@@ -1,4 +1,3 @@
-```yaml
 name: NSE Swing Scanner
 
 on:
@@ -19,4 +18,3 @@ jobs:
           FYERS_CLIENT_ID: ${{ secrets.FYERS_CLIENT_ID }}
           FYERS_SECRET_KEY: ${{ secrets.FYERS_SECRET_KEY }}
         run: python scanner.py
-```
