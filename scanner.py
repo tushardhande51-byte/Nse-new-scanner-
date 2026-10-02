@@ -1,2 +1,2 @@
-print("NSE Swing Scanner Started")
-print("Scanner setup successful")
+print("NSE Swing Scanner")
+print("Ready for market-data integration")
