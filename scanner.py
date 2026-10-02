@@ -13,6 +13,11 @@ data = urllib.parse.urlencode({
     "text": message
 }).encode()
 
-urllib.request.urlopen(url, data=data)
+try:
+    response = urllib.request.urlopen(url, data=data)
+    print(response.read().decode())
+except urllib.error.HTTPError as e:
+    print("Telegram error:", e.read().decode())
+    raise
 
 print("Telegram notification sent successfully!")
