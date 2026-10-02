@@ -1,6 +1,6 @@
 import urllib.request
 
-url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500"
+url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
 
 req = urllib.request.Request(
     url,
@@ -16,9 +16,9 @@ try:
     response = urllib.request.urlopen(req, timeout=20)
     data = response.read().decode("utf-8")
 
-    print("NIFTY 500 DATA SUCCESS")
+    print("NIFTY 50 DATA SUCCESS")
     print(data[:2000])
 
 except Exception as e:
-    print("NIFTY 500 DATA ERROR:", e)
+    print("NIFTY 50 DATA ERROR:", e)
     raise
