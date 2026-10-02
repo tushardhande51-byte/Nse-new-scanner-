@@ -1,14 +1,11 @@
 import urllib.request
 
-url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050"
+url = "https://query1.finance.yahoo.com/v8/finance/chart/RELIANCE.NS?range=1mo&interval=1d"
 
 req = urllib.request.Request(
     url,
     headers={
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.nseindia.com/"
+        "User-Agent": "Mozilla/5.0"
     }
 )
 
@@ -16,9 +13,9 @@ try:
     response = urllib.request.urlopen(req, timeout=20)
     data = response.read().decode("utf-8")
 
-    print("NIFTY 50 DATA SUCCESS")
+    print("MARKET DATA SUCCESS")
     print(data[:2000])
 
 except Exception as e:
-    print("NIFTY 50 DATA ERROR:", e)
+    print("MARKET DATA ERROR:", e)
     raise
