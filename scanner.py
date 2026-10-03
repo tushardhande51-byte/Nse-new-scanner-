@@ -990,7 +990,7 @@ def main():
     print("NSE SWING SCANNER")
     print("================================")
 
-    # 1. Screener fundamental universe
+    # 1. Get fundamental stocks from Screener
     companies = get_screener_companies()
 
     if not companies:
@@ -1001,21 +1001,30 @@ def main():
 
         raise SystemExit(1)
 
-    # 2. Convert Screener companies
-    #    into NSE symbols
-    nse_stocks = get_nse_symbols(
-        companies
+    # 2. Screener se directly mile
+    #    NSE symbols ko technical scanner me bhejo
+    nse_stocks = companies
+
+    print("--------------------------------")
+    print(
+        f"FUNDAMENTAL STOCKS: {len(companies)}"
     )
+
+    print(
+        f"TECHNICAL SCAN UNIVERSE: {len(nse_stocks)}"
+    )
+
+    print("--------------------------------")
 
     if not nse_stocks:
 
         print(
-            "ERROR: NSE symbols nahi mile."
+            "ERROR: Technical scan ke liye stocks nahi mile."
         )
 
         raise SystemExit(1)
 
-    # 3. Technical scan
+    # 3. Technical 6/6 scan
     setups = run_scan(
         nse_stocks
     )
