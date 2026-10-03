@@ -1,34 +1,70 @@
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
 
-SCREENER_URL = "https://www.screener.in/screens/4008468/tushar-dhande/"
+# =========================================================
+# SETTINGS
+# =========================================================
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+SCREENER_URL = (
+    "https://www.screener.in/screens/"
+    "4008468/tushar-dhande/"
+)
+
+YAHOO_URL = (
+    "https://query1.finance.yahoo.com/"
+    "v8/finance/chart/{}.NS"
+)
+
+TELEGRAM_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+)
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 10) "
+        "Mozilla/5.0 "
+        "(Linux; Android 10) "
         "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/154.0 Mobile Safari/537.36"
+        "Chrome/154.0 Safari/537.36"
     )
 }
 
+MAX_WORKERS = 8
+
+
+# =========================================================
+# TELEGRAM
+# =========================================================
 
 def send_telegram(message):
 
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram secrets missing")
+    if not TELEGRAM_TOKEN:
+        print("Telegram token missing")
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    if not TELEGRAM_CHAT_ID:
+        print("Telegram chat ID missing")
+        return False
+
+    url = (
+        "https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/sendMessage"
+    )
 
     try:
-        r = requests.post(
+
+        response = requests.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -37,39 +73,66 @@ def send_telegram(message):
             timeout=20
         )
 
-        print("Telegram status:", r.status_code)
+        print(
+            "Telegram status:",
+            response.status_code
+        )
 
-        if r.ok:
+        if response.ok:
+
             print("Telegram: SENT")
+
             return True
 
-        print("Telegram error:", r.text)
+        print(
+            "Telegram error:",
+            response.text
+        )
+
         return False
 
     except Exception as e:
-        print("Telegram exception:", e)
+
+        print(
+            "Telegram exception:",
+            e
+        )
+
         return False
 
+
+# =========================================================
+# STAGE 1
+# SCREENER FUNDAMENTAL STOCKS
+# =========================================================
 
 def get_screener_stocks():
 
     print()
     print("==========================================")
-    print("     SCREENER FUNDAMENTAL SCREEN")
+    print("     STAGE 1: FUNDAMENTAL SCREEN")
     print("==========================================")
 
     session = requests.Session()
-    session.headers.update(HEADERS)
+
+    session.headers.update(
+        HEADERS
+    )
 
     stocks = []
 
-    # Read multiple result pages
     for page in range(1, 20):
 
         if page == 1:
+
             url = SCREENER_URL
+
         else:
-            url = SCREENER_URL + f"?page={page}"
+
+            url = (
+                SCREENER_URL +
+                f"?page={page}"
+            )
 
         try:
 
@@ -84,7 +147,11 @@ def get_screener_stocks():
             )
 
             if response.status_code != 200:
-                print("Screener request failed")
+
+                print(
+                    "Screener request failed"
+                )
+
                 break
 
             soup = BeautifulSoup(
@@ -92,12 +159,11 @@ def get_screener_stocks():
                 "html.parser"
             )
 
-            page_count = 0
-
-            # Screener result table
             rows = soup.select(
                 "table.data-table tbody tr"
             )
+
+            page_count = 0
 
             for row in rows:
 
@@ -106,6 +172,7 @@ def get_screener_stocks():
                 )
 
                 if not link:
+
                     continue
 
                 name = link.get_text(
@@ -118,7 +185,6 @@ def get_screener_stocks():
                     ""
                 )
 
-                # Extract NSE symbol from company URL
                 match = re.search(
                     r"/company/([^/]+)/",
                     href
@@ -131,6 +197,7 @@ def get_screener_stocks():
                 )
 
                 if not name:
+
                     continue
 
                 key = (
@@ -145,9 +212,16 @@ def get_screener_stocks():
                 ):
 
                     stocks.append({
-                        "name": name,
-                        "symbol": symbol,
-                        "key": key
+
+                        "name":
+                            name,
+
+                        "symbol":
+                            symbol,
+
+                        "key":
+                            key
+
                     })
 
                     page_count += 1
@@ -158,6 +232,7 @@ def get_screener_stocks():
             )
 
             if page_count == 0:
+
                 break
 
         except Exception as e:
@@ -169,103 +244,574 @@ def get_screener_stocks():
 
             break
 
+    print()
+    print(
+        "Fundamental PASS:",
+        len(stocks)
+    )
+
     return stocks
 
 
-def send_results(stocks):
+# =========================================================
+# YAHOO DAILY DATA
+# =========================================================
+
+def get_price_data(symbol):
+
+    try:
+
+        url = YAHOO_URL.format(
+            symbol
+        )
+
+        response = requests.get(
+            url,
+            params={
+                "range": "4mo",
+                "interval": "1d",
+                "events": "history"
+            },
+            headers=HEADERS,
+            timeout=20
+        )
+
+        if response.status_code != 200:
+
+            return None
+
+        data = response.json()
+
+        result = (
+            data
+            .get("chart", {})
+            .get("result")
+        )
+
+        if not result:
+
+            return None
+
+        quote = (
+            result[0]
+            .get("indicators", {})
+            .get("quote", [{}])[0]
+        )
+
+        df = pd.DataFrame({
+
+            "open":
+                quote.get(
+                    "open",
+                    []
+                ),
+
+            "high":
+                quote.get(
+                    "high",
+                    []
+                ),
+
+            "low":
+                quote.get(
+                    "low",
+                    []
+                ),
+
+            "close":
+                quote.get(
+                    "close",
+                    []
+                ),
+
+            "volume":
+                quote.get(
+                    "volume",
+                    []
+                )
+
+        })
+
+        df = df.dropna()
+
+        if len(df) < 60:
+
+            return None
+
+        return df.reset_index(
+            drop=True
+        )
+
+    except Exception:
+
+        return None
+
+
+# =========================================================
+# STAGE 2
+# TECHNICAL 6/6
+# =========================================================
+
+def technical_analysis(
+    symbol,
+    df
+):
+
+    close = df["close"]
+
+    # -----------------------------------------
+    # EMA 20
+    # -----------------------------------------
+
+    ema20 = (
+        close
+        .ewm(
+            span=20,
+            adjust=False
+        )
+        .mean()
+    )
+
+    # -----------------------------------------
+    # EMA 50
+    # -----------------------------------------
+
+    ema50 = (
+        close
+        .ewm(
+            span=50,
+            adjust=False
+        )
+        .mean()
+    )
+
+    # -----------------------------------------
+    # RSI 14
+    # -----------------------------------------
+
+    delta = close.diff()
+
+    gain = (
+        delta
+        .clip(lower=0)
+        .ewm(
+            alpha=1 / 14,
+            adjust=False
+        )
+        .mean()
+    )
+
+    loss = (
+        -delta
+        .clip(upper=0)
+        .ewm(
+            alpha=1 / 14,
+            adjust=False
+        )
+        .mean()
+    )
+
+    rs = (
+        gain /
+        loss.replace(
+            0,
+            pd.NA
+        )
+    )
+
+    rsi = (
+        100 -
+        (
+            100 /
+            (1 + rs)
+        )
+    )
+
+    # -----------------------------------------
+    # 20 DAY AVERAGE VOLUME
+    # -----------------------------------------
+
+    avg_volume20 = (
+        df["volume"]
+        .rolling(20)
+        .mean()
+    )
+
+    # -----------------------------------------
+    # PREVIOUS 20 DAY RESISTANCE
+    # -----------------------------------------
+
+    previous_20_high = (
+        df["high"]
+        .shift(1)
+        .rolling(20)
+        .max()
+    )
+
+    # -----------------------------------------
+    # CURRENT VALUES
+    # -----------------------------------------
+
+    entry = float(
+        close.iloc[-1]
+    )
+
+    current_ema20 = float(
+        ema20.iloc[-1]
+    )
+
+    current_ema50 = float(
+        ema50.iloc[-1]
+    )
+
+    current_rsi = float(
+        rsi.iloc[-1]
+    )
+
+    current_volume = float(
+        df["volume"].iloc[-1]
+    )
+
+    average_volume = float(
+        avg_volume20.iloc[-1]
+    )
+
+    resistance = float(
+        previous_20_high.iloc[-1]
+    )
+
+    # =================================================
+    # SIX FILTERS
+    # =================================================
+
+    # 1. Trend
+    filter_1 = (
+        entry >
+        current_ema20 >
+        current_ema50
+    )
+
+    # 2. EMA
+    filter_2 = (
+        entry >
+        current_ema20
+    )
+
+    # 3. RSI
+    filter_3 = (
+        55 <=
+        current_rsi <=
+        70
+    )
+
+    # 4. Volume
+    filter_4 = (
+        current_volume >
+        average_volume * 1.5
+    )
+
+    # 5. Resistance proximity
+    filter_5 = (
+        entry >=
+        resistance * 0.98
+    )
+
+    # 6. Breakout
+    filter_6 = (
+        entry >
+        resistance
+    )
+
+    filters = [
+        filter_1,
+        filter_2,
+        filter_3,
+        filter_4,
+        filter_5,
+        filter_6
+    ]
+
+    # STRICT 6/6
+    if not all(filters):
+
+        return None
+
+    # =================================================
+    # TRADE LEVELS
+    # =================================================
+
+    # Entry = current close
+    entry_price = entry
+
+    # Stoploss = 5% below entry
+    stop_loss = (
+        entry_price * 0.95
+    )
+
+    # Target = +10%
+    target = (
+        entry_price * 1.10
+    )
+
+    return {
+
+        "symbol":
+            symbol,
+
+        "entry":
+            round(
+                entry_price,
+                2
+            ),
+
+        "sl":
+            round(
+                stop_loss,
+                2
+            ),
+
+        "target":
+            round(
+                target,
+                2
+            ),
+
+        "rsi":
+            round(
+                current_rsi,
+                2
+            ),
+
+        "resistance":
+            round(
+                resistance,
+                2
+            ),
+
+        "volume_ratio":
+            round(
+                current_volume /
+                average_volume,
+                2
+            ),
+
+        "filters":
+            "6/6"
+
+    }
+
+
+# =========================================================
+# TELEGRAM FINAL ALERT
+# =========================================================
+
+def send_final_results(
+    results
+):
 
     print()
     print("==========================================")
     print(
-        "FUNDAMENTAL PASS:",
-        len(stocks)
+        "FINAL TECHNICAL 6/6:",
+        len(results)
     )
     print("==========================================")
 
-    if not stocks:
-
-        send_telegram(
-            "🔔 NSE FUNDAMENTAL SCANNER\n\n"
-            "⚠️ No stocks received from Screener.\n\n"
-            "Please check the Screener screen."
-        )
-
-        return
-
-    # Telegram has message-size limits,
-    # so split into several messages.
-    chunk_size = 40
-
-    for start in range(
-        0,
-        len(stocks),
-        chunk_size
-    ):
-
-        chunk = stocks[
-            start:start + chunk_size
-        ]
+    if not results:
 
         message = (
-            "🔔 NSE FUNDAMENTAL SCREEN\n\n"
-            "✅ FUNDAMENTAL PASS\n\n"
+            "🔔 NSE SWING SCANNER\n\n"
+            "Fundamental stocks scanned.\n\n"
+            "❌ Technical 6/6 PASS: 0\n\n"
+            "Aaj koi stock 6/6 technical "
+            "filters pass nahi hua."
         )
-
-        for i, stock in enumerate(
-            chunk,
-            start=start + 1
-        ):
-
-            message += (
-                f"{i}. {stock['name']}\n"
-            )
-
-        message += (
-            f"\nTotal PASS: {len(stocks)}"
-        )
-
-        if start + chunk_size >= len(stocks):
-
-            message += (
-                "\n\n➡️ Next step: "
-                "6 technical filters"
-            )
 
         send_telegram(
             message
         )
 
+        return
+
+    message = (
+        "🚨 NSE SWING SCANNER\n\n"
+        "✅ FUNDAMENTAL + TECHNICAL 6/6\n\n"
+    )
+
+    for i, x in enumerate(
+        results,
+        start=1
+    ):
+
+        message += (
+
+            f"{i}. {x['symbol']}\n"
+
+            f"Entry: ₹{x['entry']:.2f}\n"
+
+            f"Stoploss: ₹{x['sl']:.2f}\n"
+
+            f"Target: ₹{x['target']:.2f}\n"
+
+            f"RSI: {x['rsi']:.2f}\n"
+
+            f"Volume: {x['volume_ratio']:.2f}x\n"
+
+            f"Filter: 6/6\n\n"
+        )
+
+    message += (
+        f"Total Final Stocks: "
+        f"{len(results)}"
+    )
+
+    send_telegram(
+        message
+    )
+
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def main():
 
     print()
     print("==========================================")
-    print("       NSE FUNDAMENTAL SCANNER")
-    print("       STAGE 1")
+    print("       NSE SWING SCANNER")
+    print("       FUNDAMENTAL + TECHNICAL")
     print("==========================================")
 
-    stocks = get_screener_stocks()
+    # -----------------------------------------
+    # STEP 1
+    # -----------------------------------------
 
-    print()
-    print("Stocks received from Screener:",
-          len(stocks))
+    fundamental_stocks = (
+        get_screener_stocks()
+    )
 
-    for i, stock in enumerate(
-        stocks,
-        start=1
-    ):
+    if not fundamental_stocks:
 
         print(
-            f"{i}. {stock['name']}"
+            "No fundamental stocks found."
         )
 
-    send_results(
-        stocks
+        send_telegram(
+            "⚠️ NSE Scanner\n\n"
+            "Fundamental screen returned 0 stocks."
+        )
+
+        return
+
+    # -----------------------------------------
+    # STEP 2
+    # -----------------------------------------
+
+    print()
+    print("==========================================")
+    print("     STAGE 2: TECHNICAL 6/6")
+    print("==========================================")
+
+    print(
+        "Stocks to analyse:",
+        len(fundamental_stocks)
+    )
+
+    final_results = []
+
+    completed = 0
+
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
+
+        futures = {
+
+            executor.submit(
+                get_price_data,
+                stock["symbol"]
+            ):
+                stock
+
+            for stock
+            in fundamental_stocks
+            if stock["symbol"]
+        }
+
+        for future in as_completed(
+            futures
+        ):
+
+            completed += 1
+
+            stock = futures[
+                future
+            ]
+
+            df = future.result()
+
+            if df is not None:
+
+                result = (
+                    technical_analysis(
+                        stock["symbol"],
+                        df
+                    )
+                )
+
+                if result:
+
+                    result["name"] = (
+                        stock["name"]
+                    )
+
+                    final_results.append(
+                        result
+                    )
+
+            if (
+                completed % 25 == 0
+                or
+                completed ==
+                len(futures)
+            ):
+
+                print(
+                    f"Technical progress: "
+                    f"{completed}/"
+                    f"{len(futures)} | "
+                    f"6/6 PASS: "
+                    f"{len(final_results)}"
+                )
+
+    # -----------------------------------------
+    # FINAL
+    # -----------------------------------------
+
+    print()
+
+    for x in final_results:
+
+        print(
+            f"{x['symbol']} | "
+            f"Entry ₹{x['entry']:.2f} | "
+            f"SL ₹{x['sl']:.2f} | "
+            f"Target ₹{x['target']:.2f} | "
+            f"RSI {x['rsi']:.2f} | "
+            f"Volume {x['volume_ratio']:.2f}x | "
+            f"6/6"
+        )
+
+    send_final_results(
+        final_results
     )
 
     print()
     print("==========================================")
-    print("STAGE 1 COMPLETE")
+    print(
+        "FINAL BUY COUNT:",
+        len(final_results)
+    )
     print("==========================================")
 
 
