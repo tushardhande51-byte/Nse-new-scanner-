@@ -3,12 +3,17 @@ import json
 import csv
 import io
 import time
+import math
 
 UNIVERSE_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 
+CAPITAL = 30000
+RISK_PERCENT = 0.01
+MAX_RISK = CAPITAL * RISK_PERCENT
+
 
 # =========================
-# GET NSE STOCK UNIVERSE
+# NSE UNIVERSE
 # =========================
 
 def get_universe():
@@ -36,7 +41,7 @@ def get_universe():
 
 
 # =========================
-# GET STOCK DATA
+# MARKET DATA
 # =========================
 
 def get_data(symbol):
@@ -61,6 +66,21 @@ def get_data(symbol):
 
     quote = result["indicators"]["quote"][0]
 
+    opens = [
+        x for x in quote["open"]
+        if x is not None
+    ]
+
+    highs = [
+        x for x in quote["high"]
+        if x is not None
+    ]
+
+    lows = [
+        x for x in quote["low"]
+        if x is not None
+    ]
+
     closes = [
         x for x in quote["close"]
         if x is not None
@@ -71,10 +91,10 @@ def get_data(symbol):
         if x is not None
     ]
 
-    if len(closes) < 60 or len(volumes) < 60:
+    if len(closes) < 60:
         return None
 
-    return closes, volumes
+    return opens, highs, lows, closes, volumes
 
 
 # =========================
@@ -137,7 +157,7 @@ def rsi(values, period=14):
 
 
 # =========================
-# 6/6 ANALYSIS
+# ANALYZE STOCK
 # =========================
 
 def analyze(symbol):
@@ -147,7 +167,7 @@ def analyze(symbol):
     if data is None:
         return None
 
-    closes, volumes = data
+    opens, highs, lows, closes, volumes = data
 
     close = closes[-1]
 
@@ -156,9 +176,9 @@ def analyze(symbol):
 
     rsi14 = rsi(closes, 14)
 
-    avg_volume20 = (
-        sum(volumes[-21:-1]) / 20
-    )
+    avg_volume20 = sum(
+        volumes[-21:-1]
+    ) / 20
 
     if avg_volume20 <= 0:
         return None
@@ -168,74 +188,123 @@ def analyze(symbol):
     )
 
     previous_20_high = max(
-        closes[-21:-1]
+        highs[-21:-1]
     )
 
     previous_50_high = max(
-        closes[-51:-1]
+        highs[-51:-1]
     )
 
-    # FILTER 1
+    # =========================
+    # 6 FILTERS
+    # =========================
+
     f1 = close > ema20 > ema50
 
-    # FILTER 2
     f2 = close > ema20
 
-    # FILTER 3
     f3 = 55 <= rsi14 <= 70
 
-    # FILTER 4
     f4 = volume_multiple > 1.5
 
-    # FILTER 5
-    near_20 = (
-        close >= previous_20_high * 0.97
-    )
+    near20 = close >= previous_20_high * 0.97
+    near50 = close >= previous_50_high * 0.97
 
-    near_50 = (
-        close >= previous_50_high * 0.97
-    )
+    f5 = near20 or near50
 
-    f5 = near_20 or near_50
-
-    # FILTER 6
     f6 = (
         close > previous_20_high
         and volume_multiple > 1.5
     )
 
     score = sum([
-        f1,
-        f2,
-        f3,
-        f4,
-        f5,
-        f6
+        f1, f2, f3, f4, f5, f6
     ])
+
+    if score != 6:
+        return None
+
+    # =========================
+    # ENTRY
+    # =========================
+
+    entry = close
+
+    # Recent 10-day swing low
+    swing_low = min(
+        lows[-11:-1]
+    )
+
+    # Small safety buffer below support
+    stop_loss = swing_low * 0.99
+
+    risk_per_share = entry - stop_loss
+
+    if risk_per_share <= 0:
+        return None
+
+    # =========================
+    # POSITION SIZE
+    # =========================
+
+    quantity = math.floor(
+        MAX_RISK / risk_per_share
+    )
+
+    if quantity < 1:
+        quantity = 1
+
+    actual_risk = (
+        risk_per_share * quantity
+    )
+
+    # =========================
+    # TARGETS
+    # =========================
+
+    target1 = entry + (
+        risk_per_share * 2
+    )
+
+    target2 = entry + (
+        risk_per_share * 3
+    )
+
+    breakout_percent = (
+        (entry - previous_20_high)
+        / previous_20_high
+    ) * 100
 
     return {
         "symbol": symbol,
-        "close": close,
-        "ema20": ema20,
-        "ema50": ema50,
+        "entry": entry,
+        "sl": stop_loss,
+        "target1": target1,
+        "target2": target2,
+        "quantity": quantity,
+        "risk_share": risk_per_share,
+        "actual_risk": actual_risk,
         "rsi": rsi14,
         "volume": volume_multiple,
-        "resistance": previous_20_high,
-        "score": score
+        "breakout": breakout_percent
     }
 
 
 # =========================
-# MAIN SCANNER
+# MAIN
 # =========================
 
 print("================================")
-print("NSE 6/6 FULL UNIVERSE SCANNER")
+print("NSE 6/6 TRADE SETUP SCANNER")
 print("================================")
+
+print("Capital: ₹", CAPITAL)
+print("Max risk/trade: ₹", MAX_RISK)
+print()
 
 stocks = get_universe()
 
-print("Universe size:", len(stocks))
+print("Universe:", len(stocks))
 print()
 
 signals = []
@@ -251,25 +320,38 @@ for symbol in stocks:
 
         processed += 1
 
-        if result is not None:
+        if result:
 
-            if result["score"] == 6:
+            signals.append(result)
 
-                signals.append(result)
+            print()
+            print("🟢 6/6 TRADE SETUP")
+            print("Stock:", result["symbol"])
+            print("Entry:", round(result["entry"], 2))
+            print("SL:", round(result["sl"], 2))
+            print("Target 1:", round(result["target1"], 2))
+            print("Target 2:", round(result["target2"], 2))
+            print("Quantity:", result["quantity"])
+            print(
+                "Risk:",
+                round(result["actual_risk"], 2)
+            )
+            print(
+                "RSI:",
+                round(result["rsi"], 2)
+            )
+            print(
+                "Volume:",
+                round(result["volume"], 2),
+                "x"
+            )
+            print(
+                "Breakout:",
+                round(result["breakout"], 2),
+                "%"
+            )
 
-                print(
-                    "🟢 6/6:",
-                    result["symbol"],
-                    "| Close:",
-                    round(result["close"], 2),
-                    "| RSI:",
-                    round(result["rsi"], 2),
-                    "| Volume:",
-                    round(result["volume"], 2),
-                    "x"
-                )
-
-        if processed % 50 == 0:
+        if processed % 100 == 0:
 
             print(
                 "Progress:",
@@ -278,7 +360,6 @@ for symbol in stocks:
                 len(stocks)
             )
 
-        # Small delay to reduce request pressure
         time.sleep(0.5)
 
     except Exception as e:
@@ -296,7 +377,7 @@ for symbol in stocks:
 
 
 # =========================
-# FINAL RESULT
+# FINAL
 # =========================
 
 print()
@@ -304,35 +385,30 @@ print("================================")
 print("SCAN COMPLETE")
 print("================================")
 
-print("Stocks processed:", processed)
+print("Processed:", processed)
 print("Errors:", errors)
 
 print()
-print("FINAL 6/6 SIGNALS:", len(signals))
+print("FINAL TRADE SETUPS:", len(signals))
 
 print("--------------------------------")
 
-if signals:
+for x in signals:
 
-    for x in signals:
-
-        print(
-            "🟢",
-            x["symbol"],
-            "| Score: 6/6",
-            "| Close:",
-            round(x["close"], 2),
-            "| RSI:",
-            round(x["rsi"], 2),
-            "| Vol:",
-            round(x["volume"], 2),
-            "x",
-            "| Resistance:",
-            round(x["resistance"], 2)
-        )
-
-else:
-
-    print("No 6/6 signals found.")
+    print(
+        x["symbol"],
+        "| Entry:",
+        round(x["entry"], 2),
+        "| SL:",
+        round(x["sl"], 2),
+        "| T1:",
+        round(x["target1"], 2),
+        "| T2:",
+        round(x["target2"], 2),
+        "| Qty:",
+        x["quantity"],
+        "| Risk:",
+        round(x["actual_risk"], 2)
+    )
 
 print("================================")
