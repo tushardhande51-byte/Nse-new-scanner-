@@ -44,12 +44,13 @@ def get_screener_companies():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    for page in range(1, SCREENER_PAGES + 1):
+    for page in range(1, 11):
 
         url = SCREENER_URL
 
         if page > 1:
-            url += f"?page={page}"
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}page={page}"
 
         try:
 
@@ -67,41 +68,84 @@ def get_screener_companies():
 
             page_count = 0
 
-            for row in soup.select("tr"):
+            # Screener result table
+            for row in soup.select(
+                "table.data-table tbody tr"
+            ):
 
                 link = row.select_one(
-                    "a[href*='/company/']"
+                    "td.text a"
                 )
 
                 if not link:
+                    link = row.select_one(
+                        "a[href*='/company/']"
+                    )
+
+                if not link:
                     continue
+
+                href = link.get(
+                    "href",
+                    ""
+                ).strip()
 
                 name = link.get_text(
                     " ",
                     strip=True
                 )
 
-                href = link.get("href", "")
+                if not href or not name:
+                    continue
 
-                if name and href:
+                # ----------------------------------------
+                # IMPORTANT:
+                # Extract symbol directly from URL
+                # ----------------------------------------
 
-                    item = {
-                        "name": name,
-                        "url": "https://www.screener.in" + href
-                    }
+                match = re.search(
+                    r"/company/([^/]+)/",
+                    href
+                )
 
-                    if not any(
-                        x["url"] == item["url"]
-                        for x in companies
-                    ):
-                        companies.append(item)
-                        page_count += 1
+                if not match:
+                    continue
+
+                symbol = match.group(1).upper()
+
+                # Skip numeric BSE IDs
+                if symbol.isdigit():
+                    continue
+
+                # Clean Screener URL variants
+                symbol = symbol.replace(
+                    "-",
+                    ""
+                )
+
+                item = {
+                    "name": name,
+                    "symbol": symbol
+                }
+
+                if not any(
+                    x["symbol"] == symbol
+                    for x in companies
+                ):
+
+                    companies.append(
+                        item
+                    )
+
+                    page_count += 1
 
             print(
                 f"Screener page {page}: "
-                f"{page_count} stocks"
+                f"{page_count} NSE candidates"
             )
 
+            # If this page has no rows,
+            # stop pagination
             if page_count == 0:
                 break
 
@@ -113,11 +157,15 @@ def get_screener_companies():
                 f"Screener page {page} error: {e}"
             )
 
+    print("--------------------------------")
     print(
-        f"TOTAL FUNDAMENTAL STOCKS: {len(companies)}"
+        f"FUNDAMENTAL STOCKS FOUND: "
+        f"{len(companies)}"
     )
+    print("--------------------------------")
 
     return companies
+
 
 
 # ============================================================
