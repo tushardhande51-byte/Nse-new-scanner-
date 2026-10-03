@@ -1,274 +1,183 @@
-import urllib.request
-import json
-import csv
-import io
+import requests
+import pandas as pd
+import numpy as np
 import time
 import math
 
-UNIVERSE_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-
 CAPITAL = 30000
-RISK_PERCENT = 0.01
-MAX_RISK = CAPITAL * RISK_PERCENT
+RISK_PER_TRADE = CAPITAL * 0.01
+MAX_STOP_DISTANCE = 0.08
 
-
-# =========================
-# NSE UNIVERSE
-# =========================
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
 def get_universe():
+    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 
-    req = urllib.request.Request(
-        UNIVERSE_URL,
-        headers={"User-Agent": "Mozilla/5.0"}
-    )
+    r = requests.get(url, headers=HEADERS, timeout=20)
+    r.raise_for_status()
 
-    response = urllib.request.urlopen(req, timeout=30)
-    data = response.read().decode("utf-8")
+    df = pd.read_csv(pd.io.common.StringIO(r.text))
 
-    reader = csv.DictReader(io.StringIO(data))
+    symbols = []
 
-    stocks = []
+    for s in df["SYMBOL"].dropna():
+        symbols.append(str(s).strip() + ".NS")
 
-    for row in reader:
+    return symbols
 
-        symbol = row.get("SYMBOL", "").strip()
-
-        if symbol:
-            stocks.append(symbol + ".NS")
-
-    return stocks
-
-
-# =========================
-# MARKET DATA
-# =========================
 
 def get_data(symbol):
-
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/"
         f"{symbol}?range=6mo&interval=1d"
     )
 
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0"}
-    )
+    r = requests.get(url, headers=HEADERS, timeout=15)
 
-    response = urllib.request.urlopen(req, timeout=20)
-
-    data = json.loads(
-        response.read().decode("utf-8")
-    )
-
-    result = data["chart"]["result"][0]
-
-    quote = result["indicators"]["quote"][0]
-
-    opens = [
-        x for x in quote["open"]
-        if x is not None
-    ]
-
-    highs = [
-        x for x in quote["high"]
-        if x is not None
-    ]
-
-    lows = [
-        x for x in quote["low"]
-        if x is not None
-    ]
-
-    closes = [
-        x for x in quote["close"]
-        if x is not None
-    ]
-
-    volumes = [
-        x for x in quote["volume"]
-        if x is not None
-    ]
-
-    if len(closes) < 60:
+    if r.status_code != 200:
         return None
 
-    return opens, highs, lows, closes, volumes
+    data = r.json()
 
+    result = data.get("chart", {}).get("result")
 
-# =========================
-# EMA
-# =========================
-
-def ema(values, period):
-
-    multiplier = 2 / (period + 1)
-
-    value = sum(values[:period]) / period
-
-    for price in values[period:]:
-
-        value = (
-            (price - value) * multiplier
-            + value
-        )
-
-    return value
-
-
-# =========================
-# RSI
-# =========================
-
-def rsi(values, period=14):
-
-    gains = []
-    losses = []
-
-    for i in range(1, len(values)):
-
-        change = values[i] - values[i - 1]
-
-        gains.append(max(change, 0))
-        losses.append(max(-change, 0))
-
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-
-    for i in range(period, len(gains)):
-
-        avg_gain = (
-            (avg_gain * (period - 1))
-            + gains[i]
-        ) / period
-
-        avg_loss = (
-            (avg_loss * (period - 1))
-            + losses[i]
-        ) / period
-
-    if avg_loss == 0:
-        return 100
-
-    rs = avg_gain / avg_loss
-
-    return 100 - (100 / (1 + rs))
-
-
-# =========================
-# ANALYZE STOCK
-# =========================
-
-def analyze(symbol):
-
-    data = get_data(symbol)
-
-    if data is None:
+    if not result:
         return None
 
-    opens, highs, lows, closes, volumes = data
+    result = result[0]
 
-    close = closes[-1]
+    timestamps = result.get("timestamp")
+    quote = result.get("indicators", {}).get("quote", [{}])[0]
 
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
-
-    rsi14 = rsi(closes, 14)
-
-    avg_volume20 = sum(
-        volumes[-21:-1]
-    ) / 20
-
-    if avg_volume20 <= 0:
+    if not timestamps:
         return None
 
-    volume_multiple = (
-        volumes[-1] / avg_volume20
-    )
+    df = pd.DataFrame({
+        "date": pd.to_datetime(timestamps, unit="s"),
+        "open": quote.get("open"),
+        "high": quote.get("high"),
+        "low": quote.get("low"),
+        "close": quote.get("close"),
+        "volume": quote.get("volume")
+    })
 
-    previous_20_high = max(
-        highs[-21:-1]
-    )
+    df = df.dropna().reset_index(drop=True)
 
-    previous_50_high = max(
-        highs[-51:-1]
-    )
+    return df
 
-    # =========================
-    # 6 FILTERS
-    # =========================
 
-    f1 = close > ema20 > ema50
+def calculate_rsi(series, period=14):
+    delta = series.diff()
 
-    f2 = close > ema20
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-    f3 = 55 <= rsi14 <= 70
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
 
-    f4 = volume_multiple > 1.5
+    rs = avg_gain / avg_loss.replace(0, np.nan)
 
-    near20 = close >= previous_20_high * 0.97
-    near50 = close >= previous_50_high * 0.97
+    rsi = 100 - (100 / (1 + rs))
 
-    f5 = near20 or near50
+    return rsi
 
-    f6 = (
-        close > previous_20_high
-        and volume_multiple > 1.5
-    )
 
-    score = sum([
-        f1, f2, f3, f4, f5, f6
-    ])
+def check_setup(df):
 
-    if score != 6:
+    if len(df) < 60:
         return None
 
-    # =========================
-    # ENTRY
-    # =========================
+    close = df["close"]
 
-    entry = close
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
 
-    # Recent 10-day swing low
-    swing_low = min(
-        lows[-11:-1]
+    rsi = calculate_rsi(close)
+
+    volume_avg20 = df["volume"].rolling(20).mean()
+
+    entry = float(close.iloc[-1])
+
+    ema20_now = float(ema20.iloc[-1])
+    ema50_now = float(ema50.iloc[-1])
+    rsi_now = float(rsi.iloc[-1])
+
+    volume_now = float(df["volume"].iloc[-1])
+    volume_avg = float(volume_avg20.iloc[-1])
+
+    if volume_avg <= 0:
+        return None
+
+    volume_multiple = volume_now / volume_avg
+
+    # Previous 20-day high, excluding today's candle
+    previous_20_high = float(df["high"].iloc[-21:-1].max())
+
+    # Recent 10-day swing low, excluding today's candle
+    swing_low = float(df["low"].iloc[-11:-1].min())
+
+    # 6 technical filters
+    trend_ok = entry > ema20_now > ema50_now
+    ema_ok = entry > ema20_now
+    rsi_ok = 55 <= rsi_now <= 70
+    volume_ok = volume_multiple >= 1.5
+    breakout_ok = entry > previous_20_high
+
+    # Price must be close to breakout/resistance
+    resistance_ok = (
+        entry >= previous_20_high * 0.98
     )
 
-    # Small safety buffer below support
+    filters = [
+        trend_ok,
+        ema_ok,
+        rsi_ok,
+        volume_ok,
+        resistance_ok,
+        breakout_ok
+    ]
+
+    if sum(filters) != 6:
+        return None
+
+    # -----------------------------
+    # RISK MANAGEMENT
+    # -----------------------------
+
+    # SL 1% below recent swing low
     stop_loss = swing_low * 0.99
+
+    # Maximum allowed SL distance = 8%
+    stop_distance = (entry - stop_loss) / entry
+
+    # If support-based SL is too far away, reject trade
+    if stop_distance > MAX_STOP_DISTANCE:
+        return None
+
+    if stop_loss >= entry:
+        return None
 
     risk_per_share = entry - stop_loss
 
     if risk_per_share <= 0:
         return None
 
-    # =========================
-    # POSITION SIZE
-    # =========================
-
-    quantity = math.floor(
-        MAX_RISK / risk_per_share
-    )
+    # Quantity according to ₹300 max risk
+    quantity = math.floor(RISK_PER_TRADE / risk_per_share)
 
     if quantity < 1:
-        quantity = 1
+        return None
 
-    actual_risk = (
-        risk_per_share * quantity
-    )
+    actual_risk = quantity * risk_per_share
 
-    # =========================
-    # TARGETS
-    # =========================
+    # Absolute protection: risk can NEVER exceed ₹300
+    if actual_risk > RISK_PER_TRADE:
+        return None
 
-    target1 = entry + (
-        risk_per_share * 2
-    )
-
-    target2 = entry + (
-        risk_per_share * 3
-    )
+    target1 = entry + (risk_per_share * 2)
+    target2 = entry + (risk_per_share * 3)
 
     breakout_percent = (
         (entry - previous_20_high)
@@ -276,139 +185,97 @@ def analyze(symbol):
     ) * 100
 
     return {
-        "symbol": symbol,
-        "entry": entry,
-        "sl": stop_loss,
-        "target1": target1,
-        "target2": target2,
+        "entry": round(entry, 2),
+        "sl": round(stop_loss, 2),
+        "target1": round(target1, 2),
+        "target2": round(target2, 2),
         "quantity": quantity,
-        "risk_share": risk_per_share,
-        "actual_risk": actual_risk,
-        "rsi": rsi14,
-        "volume": volume_multiple,
-        "breakout": breakout_percent
+        "risk": round(actual_risk, 2),
+        "rsi": round(rsi_now, 2),
+        "volume_multiple": round(volume_multiple, 2),
+        "breakout_percent": round(breakout_percent, 2),
+        "stop_distance": round(stop_distance * 100, 2)
     }
 
 
-# =========================
-# MAIN
-# =========================
-
 print("================================")
-print("NSE 6/6 TRADE SETUP SCANNER")
+print("NSE 6/6 RISK-MANAGED SCANNER")
 print("================================")
-
 print("Capital: ₹", CAPITAL)
-print("Max risk/trade: ₹", MAX_RISK)
+print("Max risk/trade: ₹", RISK_PER_TRADE)
+print("Max SL distance:", MAX_STOP_DISTANCE * 100, "%")
 print()
 
-stocks = get_universe()
+symbols = get_universe()
 
-print("Universe:", len(stocks))
+print("Universe:", len(symbols))
 print()
 
 signals = []
-
-processed = 0
 errors = 0
 
-for symbol in stocks:
+for i, symbol in enumerate(symbols, 1):
 
     try:
 
-        result = analyze(symbol)
+        df = get_data(symbol)
 
-        processed += 1
+        if df is None:
+            errors += 1
+            continue
 
-        if result:
+        setup = check_setup(df)
 
-            signals.append(result)
+        if setup:
 
-            print()
+            signals.append(
+                (symbol, setup)
+            )
+
             print("🟢 6/6 TRADE SETUP")
-            print("Stock:", result["symbol"])
-            print("Entry:", round(result["entry"], 2))
-            print("SL:", round(result["sl"], 2))
-            print("Target 1:", round(result["target1"], 2))
-            print("Target 2:", round(result["target2"], 2))
-            print("Quantity:", result["quantity"])
-            print(
-                "Risk:",
-                round(result["actual_risk"], 2)
-            )
-            print(
-                "RSI:",
-                round(result["rsi"], 2)
-            )
-            print(
-                "Volume:",
-                round(result["volume"], 2),
-                "x"
-            )
-            print(
-                "Breakout:",
-                round(result["breakout"], 2),
-                "%"
-            )
+            print("Stock:", symbol)
+            print("Entry:", setup["entry"])
+            print("SL:", setup["sl"])
+            print("Target 1:", setup["target1"])
+            print("Target 2:", setup["target2"])
+            print("Quantity:", setup["quantity"])
+            print("Risk:", setup["risk"])
+            print("SL distance:", setup["stop_distance"], "%")
+            print("RSI:", setup["rsi"])
+            print("Volume:", setup["volume_multiple"], "x")
+            print("Breakout:", setup["breakout_percent"], "%")
+            print()
 
-        if processed % 100 == 0:
-
-            print(
-                "Progress:",
-                processed,
-                "/",
-                len(stocks)
-            )
-
-        time.sleep(0.5)
-
-    except Exception as e:
-
+    except Exception:
         errors += 1
 
+    if i % 100 == 0:
         print(
-            "ERROR:",
-            symbol,
-            "|",
-            str(e)
+            f"Progress: {i} / {len(symbols)}"
         )
 
-        continue
+    time.sleep(0.25)
 
-
-# =========================
-# FINAL
-# =========================
 
 print()
 print("================================")
 print("SCAN COMPLETE")
 print("================================")
-
-print("Processed:", processed)
+print("Processed:", len(symbols))
 print("Errors:", errors)
-
 print()
 print("FINAL TRADE SETUPS:", len(signals))
-
 print("--------------------------------")
 
-for x in signals:
+for symbol, setup in signals:
 
     print(
-        x["symbol"],
-        "| Entry:",
-        round(x["entry"], 2),
-        "| SL:",
-        round(x["sl"], 2),
-        "| T1:",
-        round(x["target1"], 2),
-        "| T2:",
-        round(x["target2"], 2),
-        "| Qty:",
-        x["quantity"],
-        "| Risk:",
-        round(x["actual_risk"], 2)
+        f"{symbol} | "
+        f"Entry: {setup['entry']} | "
+        f"SL: {setup['sl']} | "
+        f"T1: {setup['target1']} | "
+        f"T2: {setup['target2']} | "
+        f"Qty: {setup['quantity']} | "
+        f"Risk: {setup['risk']} | "
+        f"SL%: {setup['stop_distance']}%"
     )
-
-print("================================")
