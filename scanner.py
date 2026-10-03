@@ -5,31 +5,57 @@ print("========================================")
 import os
 import sys
 import time
-import re
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 
-SCREENER_URL = "https://www.screener.in/screens/4008468/tushar-dhande/"
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# =========================================================
+# SETTINGS
+# =========================================================
+
+SCREENER_URL = (
+    "https://www.screener.in/screens/"
+    "4008468/tushar-dhande/"
+)
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN"
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID"
+)
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 Chrome/140 Safari/537.36"
+        "Mozilla/5.0 "
+        "(Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/140.0 Safari/537.36"
     )
 }
 
 
 # =========================================================
-# BASIC TEST
+# VERSION / BASIC TEST
 # =========================================================
 
-print("Python version:", sys.version)
-print("Pandas version:", pd.__version__)
-print("Requests version:", requests.__version__)
+print(
+    "Python:",
+    sys.version.split()[0]
+)
+
+print(
+    "Pandas:",
+    pd.__version__
+)
+
+print(
+    "Requests:",
+    requests.__version__
+)
 
 
 # =========================================================
@@ -46,15 +72,37 @@ def internet_test():
 
         r = requests.get(
             "https://www.google.com",
-            timeout=15,
-            headers=HEADERS
+            headers=HEADERS,
+            timeout=15
         )
 
-        print("Google status:", r.status_code)
+        print(
+            "Google status:",
+            r.status_code
+        )
+
+        if r.status_code == 200:
+
+            print(
+                "Internet: OK"
+            )
+
+            return True
+
+        print(
+            "Internet: FAILED"
+        )
+
+        return False
 
     except Exception as e:
 
-        print("Google FAILED:", e)
+        print(
+            "Internet ERROR:",
+            e
+        )
+
+        return False
 
 
 # =========================================================
@@ -71,18 +119,40 @@ def screener_test():
 
         r = requests.get(
             SCREENER_URL,
-            timeout=20,
-            headers=HEADERS
+            headers=HEADERS,
+            timeout=20
         )
 
-        print("Screener status:", r.status_code)
-        print("Screener response length:", len(r.text))
+        print(
+            "Screener status:",
+            r.status_code
+        )
 
-        return r.status_code == 200
+        print(
+            "Response length:",
+            len(r.text)
+        )
+
+        if r.status_code == 200:
+
+            print(
+                "Screener: OK"
+            )
+
+            return True
+
+        print(
+            "Screener: FAILED"
+        )
+
+        return False
 
     except Exception as e:
 
-        print("Screener FAILED:", e)
+        print(
+            "Screener ERROR:",
+            e
+        )
 
         return False
 
@@ -99,27 +169,37 @@ def get_screener_stocks():
 
     stocks = []
 
+    # Screener currently returns approximately
+    # 151 stocks across these pages.
+
     for page in range(1, 20):
 
         try:
 
             if page == 1:
+
                 url = SCREENER_URL
+
             else:
-                url = SCREENER_URL + f"?page={page}"
+
+                url = (
+                    SCREENER_URL
+                    + f"?page={page}"
+                )
 
             r = requests.get(
                 url,
-                timeout=20,
-                headers=HEADERS
+                headers=HEADERS,
+                timeout=20
             )
 
             print(
-                f"Screener page {page}: "
-                f"status={r.status_code}"
+                f"Page {page}: "
+                f"HTTP {r.status_code}"
             )
 
             if r.status_code != 200:
+
                 continue
 
             soup = BeautifulSoup(
@@ -131,6 +211,10 @@ def get_screener_stocks():
                 "table.data-table tbody tr"
             )
 
+            if not rows:
+
+                continue
+
             for row in rows:
 
                 link = row.select_one(
@@ -138,6 +222,7 @@ def get_screener_stocks():
                 )
 
                 if not link:
+
                     continue
 
                 name = link.get_text(
@@ -150,52 +235,77 @@ def get_screener_stocks():
                     ""
                 )
 
-                match = re.search(
-                    r"/company/([^/]+)",
-                    href
-                )
+                if not href:
 
-                if not match:
                     continue
 
-                screener_symbol = match.group(1)
+                # Extract Screener company slug
+                #
+                # Example:
+                # /company/SPARC/
+                #
+                parts = href.split(
+                    "/company/"
+                )
+
+                if len(parts) < 2:
+
+                    continue
+
+                symbol = (
+                    parts[1]
+                    .split("/")[0]
+                    .strip()
+                )
+
+                if not symbol:
+
+                    continue
 
                 stocks.append({
                     "name": name,
-                    "symbol": screener_symbol,
-                    "url": "https://www.screener.in" + href
+                    "symbol": symbol
                 })
 
         except Exception as e:
 
             print(
-                f"Screener page {page} ERROR:",
+                f"Page {page} ERROR:",
                 e
             )
 
-    # Remove duplicate symbols
+    # -----------------------------------------------------
+    # REMOVE DUPLICATES
+    # -----------------------------------------------------
 
     unique = {}
 
     for stock in stocks:
 
-        key = stock["url"]
+        symbol = stock["symbol"]
 
-        if key not in unique:
-            unique[key] = stock
+        if symbol not in unique:
 
-    stocks = list(unique.values())
+            unique[symbol] = stock
+
+    stocks = list(
+        unique.values()
+    )
 
     print("\n========================================")
     print("FUNDAMENTAL RESULT")
     print("========================================")
 
     print(
-        "Stocks found:",
+        "Total fundamental stocks:",
         len(stocks)
     )
 
-    for stock in stocks[:10]:
+    print(
+        "\nFirst 15 stocks:"
+    )
+
+    for stock in stocks[:15]:
 
         print(
             stock["symbol"],
@@ -204,131 +314,6 @@ def get_screener_stocks():
         )
 
     return stocks
-
-
-# =========================================================
-# RESOLVE SCREENER SYMBOL
-# =========================================================
-
-def resolve_symbol(stock):
-
-    """
-    Screener URL ko open karke actual company page se
-    symbol identify karta hai.
-
-    Numeric BSE codes ko direct Yahoo me nahi bhejega.
-    """
-
-    symbol = stock["symbol"]
-
-    # Already normal NSE-looking symbol
-    if not symbol.isdigit():
-
-        return symbol
-
-    print(
-        f"Resolving numeric code: {symbol}"
-    )
-
-    try:
-
-        r = requests.get(
-            stock["url"],
-            timeout=15,
-            headers=HEADERS
-        )
-
-        if r.status_code != 200:
-
-            print(
-                f"{symbol} -> Screener page HTTP "
-                f"{r.status_code}"
-            )
-
-            return None
-
-        soup = BeautifulSoup(
-            r.text,
-            "html.parser"
-        )
-
-        # Look for NSE links
-        for a in soup.find_all("a"):
-
-            href = a.get(
-                "href",
-                ""
-            )
-
-            text = a.get_text(
-                " ",
-                strip=True
-            ).upper()
-
-            if "NSE" not in text:
-                continue
-
-            # Try extracting symbol from NSE URL
-            patterns = [
-                r"/NSE:([A-Z0-9&-]+)",
-                r"NSE%3A([A-Z0-9&-]+)",
-                r"NSE:([A-Z0-9&-]+)"
-            ]
-
-            for pattern in patterns:
-
-                match = re.search(
-                    pattern,
-                    href.upper()
-                )
-
-                if match:
-
-                    resolved = match.group(1)
-
-                    print(
-                        f"{symbol} -> "
-                        f"{resolved}"
-                    )
-
-                    return resolved
-
-        # Try page text around NSE
-        page_text = soup.get_text(
-            " ",
-            strip=True
-        )
-
-        match = re.search(
-            r"NSE\s*[:\-]?\s*([A-Z][A-Z0-9&-]{1,20})",
-            page_text.upper()
-        )
-
-        if match:
-
-            resolved = match.group(1)
-
-            print(
-                f"{symbol} -> "
-                f"{resolved}"
-            )
-
-            return resolved
-
-        print(
-            f"{symbol} -> NSE symbol not found"
-        )
-
-        return None
-
-    except Exception as e:
-
-        print(
-            f"{symbol} -> resolve ERROR:",
-            e
-        )
-
-        return None
 
 
 # =========================================================
@@ -343,51 +328,55 @@ def prepare_nse_stocks(stocks):
 
     valid = []
 
-    skipped = 0
+    skipped = []
 
-    for i, stock in enumerate(
-        stocks,
-        start=1
-    ):
+    for stock in stocks:
 
-        original = stock["symbol"]
+        symbol = (
+            stock["symbol"]
+            .strip()
+            .upper()
+        )
 
-        # Normal Screener symbol
-        if not original.isdigit():
+        # -------------------------------------------------
+        # NUMERIC SYMBOL = BSE SECURITY CODE
+        # -------------------------------------------------
 
-            stock["nse_symbol"] = original
+        if symbol.isdigit():
 
-            valid.append(stock)
+            print(
+                f"SKIP BSE CODE: {symbol}"
+            )
+
+            skipped.append(symbol)
 
             continue
 
-        # Numeric BSE code
-        resolved = resolve_symbol(
-            stock
-        )
+        # -------------------------------------------------
+        # VALID SYMBOL
+        # -------------------------------------------------
 
-        if resolved:
+        stock["nse_symbol"] = symbol
 
-            stock["nse_symbol"] = resolved
-
-            valid.append(stock)
-
-        else:
-
-            skipped += 1
-
-        # Avoid hitting Screener too quickly
-        time.sleep(0.15)
+        valid.append(stock)
 
     print("\n----------------------------------------")
+
     print(
-        "Valid NSE stocks:",
+        "Fundamental stocks:",
+        len(stocks)
+    )
+
+    print(
+        "Valid NSE-style symbols:",
         len(valid)
     )
+
     print(
-        "Skipped unresolved:",
-        skipped
+        "Skipped numeric BSE codes:",
+        len(skipped)
     )
+
     print("----------------------------------------")
 
     return valid
@@ -399,27 +388,35 @@ def prepare_nse_stocks(stocks):
 
 def get_price_data(symbol):
 
-    yahoo_symbol = symbol.upper()
+    symbol = (
+        symbol
+        .strip()
+        .upper()
+    )
 
-    if yahoo_symbol.endswith(".NS"):
-        yahoo_symbol = yahoo_symbol[:-3]
+    # Remove exchange suffix if present
 
-    if yahoo_symbol.endswith(".BO"):
-        yahoo_symbol = yahoo_symbol[:-3]
+    if symbol.endswith(".NS"):
 
-    # Reject numeric BSE codes
-    if yahoo_symbol.isdigit():
+        symbol = symbol[:-3]
 
-        print(
-            f"{symbol} -> numeric code skipped"
-        )
+    if symbol.endswith(".BO"):
+
+        symbol = symbol[:-3]
+
+    # Never query numeric BSE code
+
+    if symbol.isdigit():
 
         return None
 
-    yahoo_symbol += ".NS"
+    yahoo_symbol = (
+        symbol + ".NS"
+    )
 
     url = (
-        "https://query1.finance.yahoo.com/v8/finance/chart/"
+        "https://query1.finance.yahoo.com"
+        "/v8/finance/chart/"
         + yahoo_symbol
     )
 
@@ -433,34 +430,36 @@ def get_price_data(symbol):
         r = requests.get(
             url,
             params=params,
-            timeout=20,
-            headers=HEADERS
+            headers=HEADERS,
+            timeout=20
         )
 
         if r.status_code != 200:
 
             print(
                 f"{symbol} -> "
-                f"{yahoo_symbol} -> "
-                f"Yahoo HTTP {r.status_code}"
+                f"Yahoo HTTP "
+                f"{r.status_code}"
             )
 
             return None
 
         data = r.json()
 
-        result = (
-            data
-            .get("chart", {})
-            .get("result")
+        chart = data.get(
+            "chart",
+            {}
+        )
+
+        result = chart.get(
+            "result"
         )
 
         if not result:
 
             print(
                 f"{symbol} -> "
-                f"{yahoo_symbol} -> "
-                "No Yahoo result"
+                "Yahoo no result"
             )
 
             return None
@@ -472,25 +471,43 @@ def get_price_data(symbol):
             []
         )
 
-        quote = (
-            result
-            .get("indicators", {})
-            .get("quote", [])
+        indicators = result.get(
+            "indicators",
+            {}
         )
 
-        if not timestamps or not quote:
+        quotes = indicators.get(
+            "quote",
+            []
+        )
+
+        if not timestamps:
 
             return None
 
-        quote = quote[0]
+        if not quotes:
+
+            return None
+
+        quote = quotes[0]
 
         df = pd.DataFrame({
             "timestamp": timestamps,
-            "open": quote.get("open"),
-            "high": quote.get("high"),
-            "low": quote.get("low"),
-            "close": quote.get("close"),
-            "volume": quote.get("volume")
+            "open": quote.get(
+                "open"
+            ),
+            "high": quote.get(
+                "high"
+            ),
+            "low": quote.get(
+                "low"
+            ),
+            "close": quote.get(
+                "close"
+            ),
+            "volume": quote.get(
+                "volume"
+            )
         })
 
         df["date"] = pd.to_datetime(
@@ -505,6 +522,9 @@ def get_price_data(symbol):
                 "volume"
             ]
         )
+
+        # Need enough history for
+        # EMA50 + RSI + 20-day calculations
 
         if len(df) < 60:
 
@@ -521,8 +541,7 @@ def get_price_data(symbol):
 
         print(
             f"{symbol} -> "
-            f"PRICE ERROR:",
-            e
+            f"Yahoo ERROR: {e}"
         )
 
         return None
@@ -540,14 +559,26 @@ def price_data_test(stocks):
 
     test_stocks = stocks[:5]
 
+    if not test_stocks:
+
+        print(
+            "No stocks available for test."
+        )
+
+        return 0
+
     success = 0
 
     for stock in test_stocks:
 
-        symbol = stock["nse_symbol"]
+        symbol = stock[
+            "nse_symbol"
+        ]
 
         print(
-            f"\nTesting {symbol}..."
+            f"\nTesting "
+            f"{symbol} -> "
+            f"{symbol}.NS"
         )
 
         df = get_price_data(
@@ -558,31 +589,43 @@ def price_data_test(stocks):
 
             success += 1
 
-            latest = df.iloc[-1]["close"]
+            latest_close = (
+                df.iloc[-1]["close"]
+            )
 
             print(
-                f"OK | Rows: {len(df)} | "
-                f"Latest close: {latest}"
+                f"OK | "
+                f"Rows: {len(df)} | "
+                f"Latest close: "
+                f"₹{latest_close:.2f}"
             )
 
         else:
 
-            print("FAILED")
+            print(
+                "FAILED"
+            )
 
         time.sleep(0.5)
 
-    print("\n----------------------------------------")
+    print(
+        "\n----------------------------------------"
+    )
+
     print(
         f"Price data test: "
         f"{success}/{len(test_stocks)}"
     )
-    print("----------------------------------------")
+
+    print(
+        "----------------------------------------"
+    )
 
     return success
 
 
 # =========================================================
-# TECHNICAL 6/6
+# TECHNICAL 6/6 CHECK
 # =========================================================
 
 def technical_check(df):
@@ -591,7 +634,10 @@ def technical_check(df):
 
         df = df.copy()
 
-        # 1. EMA20
+        # =================================================
+        # EMA20
+        # =================================================
+
         df["EMA20"] = (
             df["close"]
             .ewm(
@@ -601,7 +647,10 @@ def technical_check(df):
             .mean()
         )
 
+        # =================================================
         # EMA50
+        # =================================================
+
         df["EMA50"] = (
             df["close"]
             .ewm(
@@ -611,16 +660,23 @@ def technical_check(df):
             .mean()
         )
 
-        # 2. RSI14
+        # =================================================
+        # RSI14
+        # =================================================
 
-        delta = df["close"].diff()
-
-        gain = delta.clip(
-            lower=0
+        delta = (
+            df["close"]
+            .diff()
         )
 
-        loss = -delta.clip(
-            upper=0
+        gain = (
+            delta
+            .clip(lower=0)
+        )
+
+        loss = (
+            -delta
+            .clip(upper=0)
         )
 
         avg_gain = (
@@ -648,7 +704,9 @@ def technical_check(df):
             )
         )
 
-        # 3. Volume
+        # =================================================
+        # 20-DAY AVERAGE VOLUME
+        # =================================================
 
         df["VOL20"] = (
             df["volume"]
@@ -656,7 +714,9 @@ def technical_check(df):
             .mean()
         )
 
-        # 4. Previous 20 day high
+        # =================================================
+        # PREVIOUS 20-DAY HIGH
+        # =================================================
 
         df["PREV20HIGH"] = (
             df["high"]
@@ -667,91 +727,135 @@ def technical_check(df):
 
         latest = df.iloc[-1]
 
-        close = latest["close"]
+        close = latest[
+            "close"
+        ]
 
-        ema20 = latest["EMA20"]
+        ema20 = latest[
+            "EMA20"
+        ]
 
-        ema50 = latest["EMA50"]
+        ema50 = latest[
+            "EMA50"
+        ]
 
-        rsi = latest["RSI"]
+        rsi = latest[
+            "RSI"
+        ]
 
-        volume = latest["volume"]
+        volume = latest[
+            "volume"
+        ]
 
-        vol20 = latest["VOL20"]
+        vol20 = latest[
+            "VOL20"
+        ]
 
-        prev20high = latest["PREV20HIGH"]
+        prev20high = latest[
+            "PREV20HIGH"
+        ]
+
+        values = [
+            close,
+            ema20,
+            ema50,
+            rsi,
+            volume,
+            vol20,
+            prev20high
+        ]
 
         if any(
             pd.isna(x)
-            for x in [
-                close,
-                ema20,
-                ema50,
-                rsi,
-                volume,
-                vol20,
-                prev20high
-            ]
+            for x in values
         ):
 
             return False, None
 
         # =================================================
-        # SIX FILTERS
+        # 6 FILTERS
         # =================================================
 
         # FILTER 1
-        trend = (
+        # Trend:
+        # Close > EMA20 > EMA50
+
+        filter1 = (
             close >
             ema20 >
             ema50
         )
 
         # FILTER 2
-        ema = (
+        # EMA:
+        # Close > EMA20
+
+        filter2 = (
             close >
             ema20
         )
 
         # FILTER 3
-        rsi_filter = (
-            55 <= rsi <= 70
+        # RSI:
+        # 55 to 70
+
+        filter3 = (
+            55 <=
+            rsi <=
+            70
         )
 
         # FILTER 4
-        volume_filter = (
+        # Volume:
+        # Today > 1.5x 20-day average
+
+        filter4 = (
             volume >
             vol20 * 1.5
         )
 
         # FILTER 5
-        resistance = (
+        # Resistance:
+        # Within 2% of previous 20-day high
+
+        filter5 = (
             close >=
             prev20high * 0.98
         )
 
         # FILTER 6
-        breakout = (
+        # Breakout:
+        # Close above previous 20-day high
+
+        filter6 = (
             close >
             prev20high
         )
 
+        # =================================================
+        # FINAL 6/6
+        # =================================================
+
         passed = all([
-            trend,
-            ema,
-            rsi_filter,
-            volume_filter,
-            resistance,
-            breakout
+            filter1,
+            filter2,
+            filter3,
+            filter4,
+            filter5,
+            filter6
         ])
 
         if not passed:
 
             return False, None
 
-        # Trade levels
+        # =================================================
+        # TRADE LEVELS
+        # =================================================
 
-        entry = float(close)
+        entry = float(
+            close
+        )
 
         stoploss = (
             entry * 0.95
@@ -761,17 +865,24 @@ def technical_check(df):
             entry * 1.10
         )
 
-        return True, {
+        result = {
+
             "entry": entry,
+
             "stoploss": stoploss,
+
             "target": target,
+
             "rsi": float(rsi)
+
         }
+
+        return True, result
 
     except Exception as e:
 
         print(
-            "Technical error:",
+            "Technical ERROR:",
             e
         )
 
@@ -791,6 +902,7 @@ def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN:
 
         print(
+            "ERROR: "
             "TELEGRAM_BOT_TOKEN missing"
         )
 
@@ -799,6 +911,7 @@ def send_telegram(message):
     if not TELEGRAM_CHAT_ID:
 
         print(
+            "ERROR: "
             "TELEGRAM_CHAT_ID missing"
         )
 
@@ -806,7 +919,8 @@ def send_telegram(message):
 
     url = (
         "https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        f"bot{TELEGRAM_BOT_TOKEN}"
+        "/sendMessage"
     )
 
     payload = {
@@ -850,164 +964,112 @@ def main():
     print("NSE SWING SCANNER STARTED")
     print("========================================")
 
-    internet_test()
+    # -----------------------------------------------------
+    # INTERNET
+    # -----------------------------------------------------
+
+    if not internet_test():
+
+        print(
+            "\nSTOP: Internet unavailable."
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # SCREENER
+    # -----------------------------------------------------
 
     if not screener_test():
 
         print(
-            "STOP: Screener connection failed."
+            "\nSTOP: Screener unavailable."
         )
 
         return
 
-    # Stage 1
-    stocks = get_screener_stocks()
+    # -----------------------------------------------------
+    # FUNDAMENTAL STAGE
+    # -----------------------------------------------------
+
+    stocks = (
+        get_screener_stocks()
+    )
 
     if not stocks:
 
         print(
-            "STOP: No fundamental stocks."
+            "\nSTOP: "
+            "No fundamental stocks found."
         )
 
         return
 
     print(
-        f"\nFundamental stocks: {len(stocks)}"
+        "\nFundamental stocks:",
+        len(stocks)
     )
 
-    # Convert to valid NSE symbols
-    stocks = prepare_nse_stocks(
-        stocks
+    # -----------------------------------------------------
+    # PREPARE NSE SYMBOLS
+    # -----------------------------------------------------
+
+    stocks = (
+        prepare_nse_stocks(
+            stocks
+        )
     )
 
     if not stocks:
 
         print(
-            "STOP: No valid NSE symbols."
+            "\nSTOP: "
+            "No NSE-style symbols found."
         )
 
         return
 
-    # Price test
-    success = price_data_test(
-        stocks
+    print(
+        "\nStocks entering technical stage:",
+        len(stocks)
     )
 
-    if success == 0:
+    # -----------------------------------------------------
+    # PRICE TEST
+    # -----------------------------------------------------
 
-        print("\n========================================")
-        print("STOP")
-        print("========================================")
+    price_success = (
+        price_data_test(
+            stocks
+        )
+    )
+
+    if price_success == 0:
 
         print(
-            "NO PRICE DATA RECEIVED."
+            "\n========================================"
+        )
+
+        print(
+            "STOP: "
+            "NO PRICE DATA"
+        )
+
+        print(
+            "========================================"
         )
 
         send_telegram(
-            "NSE Swing Scanner\n\n"
+            "NSE SWING SCANNER\n\n"
             "⚠️ Price data unavailable.\n"
-            "Technical scan could not start."
+            "Technical scan did not start."
         )
 
         return
 
-    # =====================================================
-    # TECHNICAL SCAN
-    # =====================================================
-
-    print("\n========================================")
-    print("STARTING TECHNICAL 6/6 SCAN")
-    print("========================================")
-
-    final_results = []
-
-    checked = 0
-
-    for stock in stocks:
-
-        checked += 1
-
-        symbol = stock["nse_symbol"]
-
-        print(
-            f"[{checked}/{len(stocks)}] "
-            f"{symbol}"
-        )
-
-        df = get_price_data(
-            symbol
-        )
-
-        if df is None:
-
-            continue
-
-        passed, result = technical_check(
-            df
-        )
-
-        if passed:
-
-            print(
-                f">>> {symbol} "
-                f"6/6 PASS"
-            )
-
-            final_results.append({
-                "symbol": symbol,
-                "name": stock["name"],
-                **result
-            })
-
-        time.sleep(0.25)
-
-    # =====================================================
-    # FINAL RESULT
-    # =====================================================
-
-    print("\n========================================")
-    print("FINAL TECHNICAL 6/6")
-    print("========================================")
+    # -----------------------------------------------------
+    # TECHNICAL STAGE
+    # -----------------------------------------------------
 
     print(
-        "FINAL BUY COUNT:",
-        len(final_results)
-    )
-
-    if final_results:
-
-        message = (
-            "🚀 NSE SWING SCANNER\n\n"
-            "6/6 TECHNICAL PASS\n\n"
-        )
-
-        for stock in final_results:
-
-            message += (
-                f"📌 {stock['symbol']}\n"
-                f"Entry: ₹{stock['entry']:.2f}\n"
-                f"Stoploss: ₹{stock['stoploss']:.2f}\n"
-                f"Target: ₹{stock['target']:.2f}\n\n"
-            )
-
-    else:
-
-        message = (
-            "NSE SWING SCANNER\n\n"
-            "No stock passed all 6 "
-            "technical filters today."
-        )
-
-    send_telegram(message)
-
-    print("\n========================================")
-    print("SCANNER FINISHED")
-    print("========================================")
-
-
-# =========================================================
-# RUN
-# =========================================================
-
-if __name__ == "__main__":
-    main()
+        "\n============
