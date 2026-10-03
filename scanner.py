@@ -3,7 +3,33 @@ import pandas as pd
 import numpy as np
 import time
 import math
+SCREENER_URL = "https://www.screener.in/screens/4008468/tushar-dhande/"
 
+def get_fundamental_stocks():
+    import requests
+    from bs4 import BeautifulSoup
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    response = requests.get(SCREENER_URL, headers=headers, timeout=20)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    stocks = []
+
+    for row in soup.select("tr"):
+        link = row.select_one("a[href*='/company/']")
+        if link:
+            name = link.get_text(strip=True)
+            if name and name not in stocks:
+                stocks.append(name)
+
+    print(f"Fundamental stocks from Screener: {len(stocks)}")
+
+    return stocks
 CAPITAL = 30000
 RISK_PER_TRADE = CAPITAL * 0.01
 
