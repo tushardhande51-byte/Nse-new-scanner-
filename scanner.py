@@ -6,11 +6,11 @@ import math
 
 CAPITAL = 30000
 RISK_PER_TRADE = CAPITAL * 0.01
-MAX_STOP_DISTANCE = 0.08
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
 }
+
 
 def get_universe():
     url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
@@ -29,6 +29,7 @@ def get_universe():
 
 
 def get_data(symbol):
+
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/"
         f"{symbol}?range=6mo&interval=1d"
@@ -69,6 +70,7 @@ def get_data(symbol):
 
 
 def calculate_rsi(series, period=14):
+
     delta = series.diff()
 
     gain = delta.clip(lower=0)
@@ -91,8 +93,15 @@ def check_setup(df):
 
     close = df["close"]
 
-    ema20 = close.ewm(span=20, adjust=False).mean()
-    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema20 = close.ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    ema50 = close.ewm(
+        span=50,
+        adjust=False
+    ).mean()
 
     rsi = calculate_rsi(close)
 
@@ -102,6 +111,7 @@ def check_setup(df):
 
     ema20_now = float(ema20.iloc[-1])
     ema50_now = float(ema50.iloc[-1])
+
     rsi_now = float(rsi.iloc[-1])
 
     volume_now = float(df["volume"].iloc[-1])
@@ -112,22 +122,39 @@ def check_setup(df):
 
     volume_multiple = volume_now / volume_avg
 
-    # Previous 20-day high, excluding today's candle
-    previous_20_high = float(df["high"].iloc[-21:-1].max())
+    # Previous 20-day resistance
+    previous_20_high = float(
+        df["high"].iloc[-21:-1].max()
+    )
 
-    # Recent 10-day swing low, excluding today's candle
-    swing_low = float(df["low"].iloc[-11:-1].min())
+    # Recent 10-day support
+    support_10 = float(
+        df["low"].iloc[-11:-1].min()
+    )
 
-    # 6 technical filters
+    # Recent 20-day support
+    support_20 = float(
+        df["low"].iloc[-21:-1].min()
+    )
+
+    # --------------------------------
+    # 6/6 TECHNICAL FILTERS
+    # --------------------------------
+
     trend_ok = entry > ema20_now > ema50_now
-    ema_ok = entry > ema20_now
-    rsi_ok = 55 <= rsi_now <= 70
-    volume_ok = volume_multiple >= 1.5
-    breakout_ok = entry > previous_20_high
 
-    # Price must be close to breakout/resistance
+    ema_ok = entry > ema20_now
+
+    rsi_ok = 55 <= rsi_now <= 70
+
+    volume_ok = volume_multiple >= 1.5
+
     resistance_ok = (
         entry >= previous_20_high * 0.98
+    )
+
+    breakout_ok = (
+        entry > previous_20_high
     )
 
     filters = [
@@ -142,19 +169,18 @@ def check_setup(df):
     if sum(filters) != 6:
         return None
 
-    # -----------------------------
-    # RISK MANAGEMENT
-    # -----------------------------
+    # --------------------------------
+    # IMPROVED STOP LOSS
+    # --------------------------------
 
-    # SL 1% below recent swing low
-    stop_loss = swing_low * 0.99
+    # Use the stronger/higher support
+    support = max(
+        support_10,
+        support_20
+    )
 
-    # Maximum allowed SL distance = 8%
-    stop_distance = (entry - stop_loss) / entry
-
-    # If support-based SL is too far away, reject trade
-    if stop_distance > MAX_STOP_DISTANCE:
-        return None
+    # SL 1% below support
+    stop_loss = support * 0.99
 
     if stop_loss >= entry:
         return None
@@ -164,24 +190,44 @@ def check_setup(df):
     if risk_per_share <= 0:
         return None
 
-    # Quantity according to ₹300 max risk
-    quantity = math.floor(RISK_PER_TRADE / risk_per_share)
+    # --------------------------------
+    # QUANTITY
+    # --------------------------------
 
+    quantity = math.floor(
+        RISK_PER_TRADE / risk_per_share
+    )
+
+    # Cannot take even 1 share within ₹300 risk
     if quantity < 1:
         return None
 
     actual_risk = quantity * risk_per_share
 
-    # Absolute protection: risk can NEVER exceed ₹300
+    # Absolute risk protection
     if actual_risk > RISK_PER_TRADE:
         return None
 
-    target1 = entry + (risk_per_share * 2)
-    target2 = entry + (risk_per_share * 3)
+    # --------------------------------
+    # TARGETS
+    # --------------------------------
+
+    target1 = entry + (
+        risk_per_share * 2
+    )
+
+    target2 = entry + (
+        risk_per_share * 3
+    )
 
     breakout_percent = (
         (entry - previous_20_high)
         / previous_20_high
+    ) * 100
+
+    stop_distance = (
+        (entry - stop_loss)
+        / entry
     ) * 100
 
     return {
@@ -194,16 +240,17 @@ def check_setup(df):
         "rsi": round(rsi_now, 2),
         "volume_multiple": round(volume_multiple, 2),
         "breakout_percent": round(breakout_percent, 2),
-        "stop_distance": round(stop_distance * 100, 2)
+        "stop_distance": round(stop_distance, 2),
+        "support": round(support, 2)
     }
 
 
 print("================================")
-print("NSE 6/6 RISK-MANAGED SCANNER")
+print("NSE 6/6 SWING SCANNER")
 print("================================")
+
 print("Capital: ₹", CAPITAL)
 print("Max risk/trade: ₹", RISK_PER_TRADE)
-print("Max SL distance:", MAX_STOP_DISTANCE * 100, "%")
 print()
 
 symbols = get_universe()
@@ -235,6 +282,7 @@ for i, symbol in enumerate(symbols, 1):
             print("🟢 6/6 TRADE SETUP")
             print("Stock:", symbol)
             print("Entry:", setup["entry"])
+            print("Support:", setup["support"])
             print("SL:", setup["sl"])
             print("Target 1:", setup["target1"])
             print("Target 2:", setup["target2"])
@@ -261,10 +309,16 @@ print()
 print("================================")
 print("SCAN COMPLETE")
 print("================================")
+
 print("Processed:", len(symbols))
 print("Errors:", errors)
 print()
-print("FINAL TRADE SETUPS:", len(signals))
+
+print(
+    "FINAL TRADE SETUPS:",
+    len(signals)
+)
+
 print("--------------------------------")
 
 for symbol, setup in signals:
@@ -272,10 +326,10 @@ for symbol, setup in signals:
     print(
         f"{symbol} | "
         f"Entry: {setup['entry']} | "
+        f"Support: {setup['support']} | "
         f"SL: {setup['sl']} | "
         f"T1: {setup['target1']} | "
         f"T2: {setup['target2']} | "
         f"Qty: {setup['quantity']} | "
-        f"Risk: {setup['risk']} | "
-        f"SL%: {setup['stop_distance']}%"
+        f"Risk: {setup['risk']}"
     )
