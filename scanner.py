@@ -1,68 +1,34 @@
 import os
+import re
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import quote
 
 
-# =========================================================
-# SETTINGS
-# =========================================================
+SCREENER_URL = "https://www.screener.in/screens/4008468/tushar-dhande/"
 
-SCREENER_QUERY = """
-Market Capitalization > 500
-AND Market Capitalization < 20000
-AND Price to Earning < 15
-AND Debt to equity < 0.5
-AND Sales growth 5Years > 15
-AND Profit growth 5Years > 20
-AND Average return on capital employed 5Years > 15
-AND Average return on equity 5Years > 15
-AND Promoter holding > 50
-AND PEG Ratio < 1
-AND Pledged percentage < 1
-"""
-
-TELEGRAM_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN",
-    ""
-)
-
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID",
-    ""
-)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 HEADERS = {
-    "User-Agent":
-        "Mozilla/5.0 "
-        "(Linux; Android 10) "
+    "User-Agent": (
+        "Mozilla/5.0 (Linux; Android 10) "
         "AppleWebKit/537.36 "
-        "Chrome/154.0 Safari/537.36"
+        "(KHTML, like Gecko) "
+        "Chrome/154.0 Mobile Safari/537.36"
+    )
 }
 
 
-# =========================================================
-# TELEGRAM
-# =========================================================
-
 def send_telegram(message):
 
-    if not TELEGRAM_TOKEN:
-        print("ERROR: TELEGRAM_BOT_TOKEN missing")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram secrets missing")
         return False
 
-    if not TELEGRAM_CHAT_ID:
-        print("ERROR: TELEGRAM_CHAT_ID missing")
-        return False
-
-    url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/sendMessage"
-    )
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
     try:
-
-        response = requests.post(
+        r = requests.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -71,71 +37,39 @@ def send_telegram(message):
             timeout=20
         )
 
-        print(
-            "Telegram status:",
-            response.status_code
-        )
+        print("Telegram status:", r.status_code)
 
-        if response.ok:
+        if r.ok:
             print("Telegram: SENT")
             return True
 
-        print(
-            "Telegram error:",
-            response.text
-        )
-
+        print("Telegram error:", r.text)
         return False
 
     except Exception as e:
-
-        print(
-            "Telegram exception:",
-            e
-        )
-
+        print("Telegram exception:", e)
         return False
 
 
-# =========================================================
-# SCREENER
-# =========================================================
-
-def get_fundamental_stocks():
+def get_screener_stocks():
 
     print()
     print("==========================================")
-    print("     FUNDAMENTAL 11/11 SCANNER")
+    print("     SCREENER FUNDAMENTAL SCREEN")
     print("==========================================")
-
-    print()
-    print("Applying 11 fundamental filters...")
-
-    query = " ".join(
-        SCREENER_QUERY.split()
-    )
-
-    encoded_query = quote(
-        query
-    )
 
     session = requests.Session()
-
-    session.headers.update(
-        HEADERS
-    )
+    session.headers.update(HEADERS)
 
     stocks = []
 
-    # Screener results are paginated.
-    # Read pages until no more companies are found.
+    # Read multiple result pages
     for page in range(1, 20):
 
-        url = (
-            "https://www.screener.in/screen/raw/"
-            f"?query={encoded_query}"
-            f"&page={page}"
-        )
+        if page == 1:
+            url = SCREENER_URL
+        else:
+            url = SCREENER_URL + f"?page={page}"
 
         try:
 
@@ -150,11 +84,7 @@ def get_fundamental_stocks():
             )
 
             if response.status_code != 200:
-
-                print(
-                    "Screener request failed."
-                )
-
+                print("Screener request failed")
                 break
 
             soup = BeautifulSoup(
@@ -162,12 +92,21 @@ def get_fundamental_stocks():
                 "html.parser"
             )
 
-            page_stocks = []
+            page_count = 0
 
-            # Company links
-            for link in soup.select(
-                "a[href*='/company/']"
-            ):
+            # Screener result table
+            rows = soup.select(
+                "table.data-table tbody tr"
+            )
+
+            for row in rows:
+
+                link = row.select_one(
+                    "a[href*='/company/']"
+                )
+
+                if not link:
+                    continue
 
                 name = link.get_text(
                     " ",
@@ -179,44 +118,52 @@ def get_fundamental_stocks():
                     ""
                 )
 
+                # Extract NSE symbol from company URL
+                match = re.search(
+                    r"/company/([^/]+)/",
+                    href
+                )
+
+                symbol = (
+                    match.group(1)
+                    if match
+                    else ""
+                )
+
                 if not name:
                     continue
 
-                if "/company/" not in href:
-                    continue
-
-                # Avoid duplicate names
-                if name not in stocks:
-                    page_stocks.append(
-                        name
-                    )
-
-            # Remove duplicates within page
-            page_stocks = list(
-                dict.fromkeys(
-                    page_stocks
+                key = (
+                    symbol
+                    if symbol
+                    else name
                 )
-            )
+
+                if not any(
+                    x["key"] == key
+                    for x in stocks
+                ):
+
+                    stocks.append({
+                        "name": name,
+                        "symbol": symbol,
+                        "key": key
+                    })
+
+                    page_count += 1
 
             print(
                 f"Page {page}: "
-                f"{len(page_stocks)} stocks"
+                f"{page_count} stocks"
             )
 
-            if not page_stocks:
+            if page_count == 0:
                 break
-
-            for name in page_stocks:
-
-                if name not in stocks:
-                    stocks.append(
-                        name
-                    )
 
         except Exception as e:
 
             print(
-                "Screener error:",
+                f"Page {page} error:",
                 e
             )
 
@@ -225,57 +172,69 @@ def get_fundamental_stocks():
     return stocks
 
 
-# =========================================================
-# TELEGRAM MESSAGE
-# =========================================================
-
 def send_results(stocks):
+
+    print()
+    print("==========================================")
+    print(
+        "FUNDAMENTAL PASS:",
+        len(stocks)
+    )
+    print("==========================================")
 
     if not stocks:
 
-        message = (
+        send_telegram(
             "🔔 NSE FUNDAMENTAL SCANNER\n\n"
-            "11/11 FILTER PASS: 0\n\n"
-            "Aaj koi stock 11 fundamental "
-            "filters pass nahi hua."
+            "⚠️ No stocks received from Screener.\n\n"
+            "Please check the Screener screen."
         )
+
+        return
+
+    # Telegram has message-size limits,
+    # so split into several messages.
+    chunk_size = 40
+
+    for start in range(
+        0,
+        len(stocks),
+        chunk_size
+    ):
+
+        chunk = stocks[
+            start:start + chunk_size
+        ]
+
+        message = (
+            "🔔 NSE FUNDAMENTAL SCREEN\n\n"
+            "✅ FUNDAMENTAL PASS\n\n"
+        )
+
+        for i, stock in enumerate(
+            chunk,
+            start=start + 1
+        ):
+
+            message += (
+                f"{i}. {stock['name']}\n"
+            )
+
+        message += (
+            f"\nTotal PASS: {len(stocks)}"
+        )
+
+        if start + chunk_size >= len(stocks):
+
+            message += (
+                "\n\n➡️ Next step: "
+                "6 technical filters"
+            )
 
         send_telegram(
             message
         )
 
-        return
-
-    message = (
-        "🔔 NSE FUNDAMENTAL SCANNER\n\n"
-        "✅ 11/11 FILTER PASS\n\n"
-    )
-
-    for i, stock in enumerate(
-        stocks,
-        start=1
-    ):
-
-        message += (
-            f"{i}. {stock}\n"
-        )
-
-    message += (
-        f"\n📊 Total PASS: "
-        f"{len(stocks)}\n\n"
-        "Next Step:\n"
-        "In stocks par 6 technical "
-        "filters lagaye jayenge."
-    )
-
-    send_telegram(
-        message
-    )
-
-
-# =========================================================
-# MAIN
-# =========================================================
 
 def main():
 
@@ -285,29 +244,11 @@ def main():
     print("       STAGE 1")
     print("==========================================")
 
-    print()
-    print("11 FILTERS:")
-    print("1. Market Cap > 500 Cr")
-    print("2. Market Cap < 20,000 Cr")
-    print("3. P/E < 15")
-    print("4. Debt/Equity < 0.5")
-    print("5. Sales Growth 5Y > 15%")
-    print("6. Profit Growth 5Y > 20%")
-    print("7. Average ROCE 5Y > 15%")
-    print("8. Average ROE 5Y > 15%")
-    print("9. Promoter Holding > 50%")
-    print("10. PEG Ratio < 1")
-    print("11. Pledged Percentage < 1%")
-
-    stocks = get_fundamental_stocks()
+    stocks = get_screener_stocks()
 
     print()
-    print("==========================================")
-    print(
-        "TOTAL FUNDAMENTAL PASS:",
-        len(stocks)
-    )
-    print("==========================================")
+    print("Stocks received from Screener:",
+          len(stocks))
 
     for i, stock in enumerate(
         stocks,
@@ -315,10 +256,9 @@ def main():
     ):
 
         print(
-            f"{i}. {stock}"
+            f"{i}. {stock['name']}"
         )
 
-    # Send names to Telegram
     send_results(
         stocks
     )
