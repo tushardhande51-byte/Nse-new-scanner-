@@ -194,38 +194,234 @@ def get_nse_symbol(company):
 def get_nse_symbols(companies):
 
     print("--------------------------------")
-    print("STEP 2: Finding NSE Symbols")
+    print("STEP 2: Matching NSE Symbols")
     print("--------------------------------")
+
+    # NSE equity list
+    NSE_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+
+    try:
+
+        response = requests.get(
+            NSE_URL,
+            headers=HEADERS,
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        from io import StringIO
+
+        nse_df = pd.read_csv(
+            StringIO(response.text)
+        )
+
+        print(
+            f"NSE equity list: {len(nse_df)} stocks"
+        )
+
+    except Exception as e:
+
+        print(
+            f"NSE list error: {e}"
+        )
+
+        return []
+
+    # --------------------------------------------------------
+    # Name cleaning
+    # --------------------------------------------------------
+
+    def clean_name(name):
+
+        name = str(name).upper()
+
+        replacements = [
+            " LIMITED",
+            " LTD",
+            " LIMITED.",
+            " LTD.",
+            " INDIA",
+            " INDIAN",
+            " CORPORATION",
+            " CORP",
+            " COMPANY",
+            " CO.",
+            " PVT",
+            " PRIVATE",
+            " SERVICES",
+            " SERVICE",
+            " INDUSTRIES",
+            " INDUSTRY",
+            " ENTERPRISES",
+            " ENTERPRISE",
+            " HOLDINGS"
+        ]
+
+        for word in replacements:
+            name = name.replace(
+                word,
+                ""
+            )
+
+        name = re.sub(
+            r"[^A-Z0-9]",
+            "",
+            name
+        )
+
+        return name
+
+    # --------------------------------------------------------
+    # Prepare NSE names
+    # --------------------------------------------------------
+
+    nse_items = []
+
+    for _, row in nse_df.iterrows():
+
+        symbol = str(
+            row.get(
+                "SYMBOL",
+                ""
+            )
+        ).strip()
+
+        company_name = str(
+            row.get(
+                "NAME OF COMPANY",
+                ""
+            )
+        ).strip()
+
+        if not symbol or not company_name:
+            continue
+
+        nse_items.append(
+            {
+                "symbol": symbol,
+                "name": company_name,
+                "clean": clean_name(company_name)
+            }
+        )
+
+    # --------------------------------------------------------
+    # Matching
+    # --------------------------------------------------------
+
+    from difflib import SequenceMatcher
 
     results = []
 
-    # Parallel requests
-    with ThreadPoolExecutor(
-        max_workers=8
-    ) as executor:
+    for company in companies:
 
-        futures = [
-            executor.submit(
-                get_nse_symbol,
-                company
+        screener_name = company["name"]
+
+        screener_clean = clean_name(
+            screener_name
+        )
+
+        matched_symbol = None
+        matched_name = None
+        best_score = 0
+
+        # --------------------------------------------
+        # FIRST: exact cleaned-name match
+        # --------------------------------------------
+
+        for item in nse_items:
+
+            if screener_clean == item["clean"]:
+
+                matched_symbol = item["symbol"]
+                matched_name = item["name"]
+                best_score = 1.0
+
+                break
+
+        # --------------------------------------------
+        # SECOND: partial match
+        # --------------------------------------------
+
+        if not matched_symbol:
+
+            for item in nse_items:
+
+                a = screener_clean
+                b = item["clean"]
+
+                if len(a) >= 6 and len(b) >= 6:
+
+                    if (
+                        a in b
+                        or b in a
+                    ):
+
+                        score = (
+                            min(len(a), len(b))
+                            /
+                            max(len(a), len(b))
+                        )
+
+                        if score > best_score:
+
+                            best_score = score
+                            matched_symbol = item["symbol"]
+                            matched_name = item["name"]
+
+        # --------------------------------------------
+        # THIRD: fuzzy matching
+        # --------------------------------------------
+
+        if not matched_symbol:
+
+            for item in nse_items:
+
+                score = SequenceMatcher(
+                    None,
+                    screener_clean,
+                    item["clean"]
+                ).ratio()
+
+                if score > best_score:
+
+                    best_score = score
+                    matched_symbol = item["symbol"]
+                    matched_name = item["name"]
+
+        # --------------------------------------------
+        # Accept only reasonably strong match
+        # --------------------------------------------
+
+        if (
+            matched_symbol
+            and best_score >= 0.72
+        ):
+
+            results.append(
+                {
+                    "name": screener_name,
+                    "symbol": matched_symbol
+                }
             )
-            for company in companies
-        ]
 
-        for future in as_completed(futures):
+            print(
+                f"MATCH: {screener_name} "
+                f"-> {matched_symbol} "
+                f"({best_score:.2f})"
+            )
 
-            try:
+        else:
 
-                result = future.result()
+            print(
+                f"SKIP: {screener_name} "
+                f"(No reliable NSE match)"
+            )
 
-                if result:
-
-                    results.append(result)
-
-            except Exception:
-                pass
-
+    # --------------------------------------------------------
     # Remove duplicates
+    # --------------------------------------------------------
+
     unique = {}
 
     for item in results:
@@ -235,11 +431,20 @@ def get_nse_symbols(companies):
         if symbol:
             unique[symbol] = item
 
-    results = list(unique.values())
+    results = list(
+        unique.values()
+    )
+
+    print("--------------------------------")
+    print(
+        f"FUNDAMENTAL STOCKS: {len(companies)}"
+    )
 
     print(
-        f"NSE SYMBOLS FOUND: {len(results)}"
+        f"NSE SYMBOLS MATCHED: {len(results)}"
     )
+
+    print("--------------------------------")
 
     return results
 
