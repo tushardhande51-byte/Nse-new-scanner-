@@ -2,360 +2,776 @@ import requests
 import pandas as pd
 import numpy as np
 import time
-import math
+import re
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
 SCREENER_URL = "https://www.screener.in/screens/4008468/tushar-dhande/"
 
-def get_fundamental_stocks():
-    import requests
-    from bs4 import BeautifulSoup
+YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{}.NS"
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+CAPITAL_RISK = 300
 
-    response = requests.get(SCREENER_URL, headers=headers, timeout=20)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    stocks = []
-
-    for row in soup.select("tr"):
-        link = row.select_one("a[href*='/company/']")
-        if link:
-            name = link.get_text(strip=True)
-            if name and name not in stocks:
-                stocks.append(name)
-
-    print(f"Fundamental stocks from Screener: {len(stocks)}")
-
-    return stocks
-CAPITAL = 30000
-RISK_PER_TRADE = CAPITAL * 0.01
+SCREENER_PAGES = 10
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0"
+    "User-Agent": (
+        "Mozilla/5.0 (Linux; Android 10) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/154.0.0.0 Mobile Safari/537.36"
+    )
 }
 
 
-def get_universe():
-    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+# ============================================================
+# 1. GET STOCKS FROM YOUR SCREENER
+# ============================================================
 
-    r = requests.get(url, headers=HEADERS, timeout=20)
-    r.raise_for_status()
+def get_screener_companies():
 
-    df = pd.read_csv(pd.io.common.StringIO(r.text))
+    print("--------------------------------")
+    print("STEP 1: Reading Screener")
+    print("--------------------------------")
 
-    symbols = []
+    companies = []
 
-    for s in df["SYMBOL"].dropna():
-        symbols.append(str(s).strip() + ".NS")
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
-    return symbols
+    for page in range(1, SCREENER_PAGES + 1):
 
+        url = SCREENER_URL
 
-def get_data(symbol):
+        if page > 1:
+            url += f"?page={page}"
 
-    url = (
-        f"https://query1.finance.yahoo.com/v8/finance/chart/"
-        f"{symbol}?range=6mo&interval=1d"
+        try:
+
+            response = session.get(
+                url,
+                timeout=30
+            )
+
+            response.raise_for_status()
+
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
+            )
+
+            page_count = 0
+
+            for row in soup.select("tr"):
+
+                link = row.select_one(
+                    "a[href*='/company/']"
+                )
+
+                if not link:
+                    continue
+
+                name = link.get_text(
+                    " ",
+                    strip=True
+                )
+
+                href = link.get("href", "")
+
+                if name and href:
+
+                    item = {
+                        "name": name,
+                        "url": "https://www.screener.in" + href
+                    }
+
+                    if not any(
+                        x["url"] == item["url"]
+                        for x in companies
+                    ):
+                        companies.append(item)
+                        page_count += 1
+
+            print(
+                f"Screener page {page}: "
+                f"{page_count} stocks"
+            )
+
+            if page_count == 0:
+                break
+
+            time.sleep(0.5)
+
+        except Exception as e:
+
+            print(
+                f"Screener page {page} error: {e}"
+            )
+
+    print(
+        f"TOTAL FUNDAMENTAL STOCKS: {len(companies)}"
     )
 
-    r = requests.get(url, headers=HEADERS, timeout=15)
+    return companies
 
-    if r.status_code != 200:
+
+# ============================================================
+# 2. GET NSE SYMBOL FROM SCREENER COMPANY PAGE
+# ============================================================
+
+def get_nse_symbol(company):
+
+    name = company["name"]
+    url = company["url"]
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=20
+        )
+
+        response.raise_for_status()
+
+        html = response.text
+
+        soup = BeautifulSoup(
+            html,
+            "html.parser"
+        )
+
+        text = soup.get_text(
+            " ",
+            strip=True
+        )
+
+        # Look for NSE: SYMBOL
+        patterns = [
+            r"NSE:\s*([A-Z0-9&._-]+)",
+            r"NSE\s*:\s*([A-Z0-9&._-]+)"
+        ]
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                text
+            )
+
+            if match:
+
+                symbol = match.group(1).strip()
+
+                # Remove unwanted punctuation
+                symbol = symbol.rstrip(".,;:")
+
+                return {
+                    "name": name,
+                    "symbol": symbol
+                }
+
         return None
 
-    data = r.json()
+    except Exception as e:
 
-    result = data.get("chart", {}).get("result")
+        print(
+            f"NSE symbol error: {name} | {e}"
+        )
 
-    if not result:
         return None
 
-    result = result[0]
 
-    timestamps = result.get("timestamp")
-    quote = result.get("indicators", {}).get("quote", [{}])[0]
+# ============================================================
+# 3. GET ALL NSE SYMBOLS
+# ============================================================
 
-    if not timestamps:
+def get_nse_symbols(companies):
+
+    print("--------------------------------")
+    print("STEP 2: Finding NSE Symbols")
+    print("--------------------------------")
+
+    results = []
+
+    # Parallel requests
+    with ThreadPoolExecutor(
+        max_workers=8
+    ) as executor:
+
+        futures = [
+            executor.submit(
+                get_nse_symbol,
+                company
+            )
+            for company in companies
+        ]
+
+        for future in as_completed(futures):
+
+            try:
+
+                result = future.result()
+
+                if result:
+
+                    results.append(result)
+
+            except Exception:
+                pass
+
+    # Remove duplicates
+    unique = {}
+
+    for item in results:
+
+        symbol = item["symbol"]
+
+        if symbol:
+            unique[symbol] = item
+
+    results = list(unique.values())
+
+    print(
+        f"NSE SYMBOLS FOUND: {len(results)}"
+    )
+
+    return results
+
+
+# ============================================================
+# 4. GET YAHOO HISTORICAL DATA
+# ============================================================
+
+def get_yahoo_data(symbol):
+
+    try:
+
+        url = YAHOO_URL.format(symbol)
+
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            params={
+                "range": "6mo",
+                "interval": "1d"
+            },
+            timeout=20
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        result = data.get(
+            "chart",
+            {}
+        ).get(
+            "result"
+        )
+
+        if not result:
+            return None
+
+        result = result[0]
+
+        timestamps = result.get(
+            "timestamp"
+        )
+
+        indicators = result.get(
+            "indicators",
+            {}
+        )
+
+        quote = indicators.get(
+            "quote",
+            [{}]
+        )[0]
+
+        if not timestamps:
+            return None
+
+        df = pd.DataFrame({
+
+            "Date": pd.to_datetime(
+                timestamps,
+                unit="s"
+            ),
+
+            "Open": quote.get(
+                "open"
+            ),
+
+            "High": quote.get(
+                "high"
+            ),
+
+            "Low": quote.get(
+                "low"
+            ),
+
+            "Close": quote.get(
+                "close"
+            ),
+
+            "Volume": quote.get(
+                "volume"
+            )
+        })
+
+        df = df.dropna(
+            subset=[
+                "Close",
+                "High",
+                "Low",
+                "Volume"
+            ]
+        )
+
+        if len(df) < 60:
+            return None
+
+        return df
+
+    except Exception as e:
+
         return None
 
-    df = pd.DataFrame({
-        "date": pd.to_datetime(timestamps, unit="s"),
-        "open": quote.get("open"),
-        "high": quote.get("high"),
-        "low": quote.get("low"),
-        "close": quote.get("close"),
-        "volume": quote.get("volume")
-    })
 
-    df = df.dropna().reset_index(drop=True)
+# ============================================================
+# 5. RSI
+# ============================================================
 
-    return df
+def calculate_rsi(
+    close,
+    period=14
+):
 
+    delta = close.diff()
 
-def calculate_rsi(series, period=14):
+    gain = delta.clip(
+        lower=0
+    )
 
-    delta = series.diff()
+    loss = -delta.clip(
+        upper=0
+    )
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False
+    ).mean()
 
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
+    avg_loss = loss.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False
+    ).mean()
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rs = avg_gain / avg_loss
 
-    rsi = 100 - (100 / (1 + rs))
+    rsi = 100 - (
+        100 / (1 + rs)
+    )
 
     return rsi
 
 
-def check_setup(df):
+# ============================================================
+# 6. TECHNICAL 6/6 FILTER
+# ============================================================
 
-    if len(df) < 60:
-        return None
-
-    close = df["close"]
-
-    ema20 = close.ewm(
-        span=20,
-        adjust=False
-    ).mean()
-
-    ema50 = close.ewm(
-        span=50,
-        adjust=False
-    ).mean()
-
-    rsi = calculate_rsi(close)
-
-    volume_avg20 = df["volume"].rolling(20).mean()
-
-    entry = float(close.iloc[-1])
-
-    ema20_now = float(ema20.iloc[-1])
-    ema50_now = float(ema50.iloc[-1])
-
-    rsi_now = float(rsi.iloc[-1])
-
-    volume_now = float(df["volume"].iloc[-1])
-    volume_avg = float(volume_avg20.iloc[-1])
-
-    if volume_avg <= 0:
-        return None
-
-    volume_multiple = volume_now / volume_avg
-
-    # Previous 20-day resistance
-    previous_20_high = float(
-        df["high"].iloc[-21:-1].max()
-    )
-
-    # Recent 10-day support
-    support_10 = float(
-        df["low"].iloc[-11:-1].min()
-    )
-
-    # Recent 20-day support
-    support_20 = float(
-        df["low"].iloc[-21:-1].min()
-    )
-
-    # --------------------------------
-    # 6/6 TECHNICAL FILTERS
-    # --------------------------------
-
-    trend_ok = entry > ema20_now > ema50_now
-
-    ema_ok = entry > ema20_now
-
-    rsi_ok = 55 <= rsi_now <= 70
-
-    volume_ok = volume_multiple >= 1.5
-
-    resistance_ok = (
-        entry >= previous_20_high * 0.98
-    )
-
-    breakout_ok = (
-        entry > previous_20_high
-    )
-
-    filters = [
-        trend_ok,
-        ema_ok,
-        rsi_ok,
-        volume_ok,
-        resistance_ok,
-        breakout_ok
-    ]
-
-    if sum(filters) != 6:
-        return None
-
-    # --------------------------------
-    # IMPROVED STOP LOSS
-    # --------------------------------
-
-    # Use the stronger/higher support
-    support = max(
-        support_10,
-        support_20
-    )
-
-    # SL 1% below support
-    stop_loss = support * 0.99
-
-    if stop_loss >= entry:
-        return None
-
-    risk_per_share = entry - stop_loss
-
-    if risk_per_share <= 0:
-        return None
-
-    # --------------------------------
-    # QUANTITY
-    # --------------------------------
-
-    quantity = math.floor(
-        RISK_PER_TRADE / risk_per_share
-    )
-
-    # Cannot take even 1 share within ₹300 risk
-    if quantity < 1:
-        return None
-
-    actual_risk = quantity * risk_per_share
-
-    # Absolute risk protection
-    if actual_risk > RISK_PER_TRADE:
-        return None
-
-    # --------------------------------
-    # TARGETS
-    # --------------------------------
-
-    target1 = entry + (
-        risk_per_share * 2
-    )
-
-    target2 = entry + (
-        risk_per_share * 3
-    )
-
-    breakout_percent = (
-        (entry - previous_20_high)
-        / previous_20_high
-    ) * 100
-
-    stop_distance = (
-        (entry - stop_loss)
-        / entry
-    ) * 100
-
-    return {
-        "entry": round(entry, 2),
-        "sl": round(stop_loss, 2),
-        "target1": round(target1, 2),
-        "target2": round(target2, 2),
-        "quantity": quantity,
-        "risk": round(actual_risk, 2),
-        "rsi": round(rsi_now, 2),
-        "volume_multiple": round(volume_multiple, 2),
-        "breakout_percent": round(breakout_percent, 2),
-        "stop_distance": round(stop_distance, 2),
-        "support": round(support, 2)
-    }
-
-
-print("================================")
-print("NSE 6/6 SWING SCANNER")
-print("================================")
-
-print("Capital: ₹", CAPITAL)
-print("Max risk/trade: ₹", RISK_PER_TRADE)
-print()
-
-symbols = get_universe()
-
-print("Universe:", len(symbols))
-print()
-
-signals = []
-errors = 0
-
-for i, symbol in enumerate(symbols, 1):
+def technical_scan(
+    symbol,
+    df
+):
 
     try:
 
-        df = get_data(symbol)
-
-        if df is None:
-            errors += 1
-            continue
-
-        setup = check_setup(df)
-
-        if setup:
-
-            signals.append(
-                (symbol, setup)
+        # EMA
+        df["EMA20"] = (
+            df["Close"]
+            .ewm(
+                span=20,
+                adjust=False
             )
-
-            print("🟢 6/6 TRADE SETUP")
-            print("Stock:", symbol)
-            print("Entry:", setup["entry"])
-            print("Support:", setup["support"])
-            print("SL:", setup["sl"])
-            print("Target 1:", setup["target1"])
-            print("Target 2:", setup["target2"])
-            print("Quantity:", setup["quantity"])
-            print("Risk:", setup["risk"])
-            print("SL distance:", setup["stop_distance"], "%")
-            print("RSI:", setup["rsi"])
-            print("Volume:", setup["volume_multiple"], "x")
-            print("Breakout:", setup["breakout_percent"], "%")
-            print()
-
-    except Exception:
-        errors += 1
-
-    if i % 100 == 0:
-        print(
-            f"Progress: {i} / {len(symbols)}"
+            .mean()
         )
 
-    time.sleep(0.25)
+        df["EMA50"] = (
+            df["Close"]
+            .ewm(
+                span=50,
+                adjust=False
+            )
+            .mean()
+        )
+
+        # RSI
+        df["RSI14"] = calculate_rsi(
+            df["Close"],
+            14
+        )
+
+        # Volume average
+        df["Volume20"] = (
+            df["Volume"]
+            .rolling(20)
+            .mean()
+        )
+
+        # Previous 20-day high
+        df["Previous20High"] = (
+            df["High"]
+            .shift(1)
+            .rolling(20)
+            .max()
+        )
+
+        # Support
+        df["Low10"] = (
+            df["Low"]
+            .rolling(10)
+            .min()
+        )
+
+        df["Low20"] = (
+            df["Low"]
+            .rolling(20)
+            .min()
+        )
+
+        last = df.iloc[-1]
+
+        entry = float(
+            last["Close"]
+        )
+
+        ema20 = float(
+            last["EMA20"]
+        )
+
+        ema50 = float(
+            last["EMA50"]
+        )
+
+        rsi = float(
+            last["RSI14"]
+        )
+
+        volume = float(
+            last["Volume"]
+        )
+
+        volume20 = float(
+            last["Volume20"]
+        )
+
+        previous20high = float(
+            last["Previous20High"]
+        )
+
+        # ====================================================
+        # 6 FILTERS
+        # ====================================================
+
+        filter1_trend = (
+            entry > ema20
+            and ema20 > ema50
+        )
+
+        filter2_ema = (
+            entry > ema20
+        )
+
+        filter3_rsi = (
+            55 <= rsi <= 70
+        )
+
+        filter4_volume = (
+            volume >
+            volume20 * 1.5
+        )
+
+        filter5_resistance = (
+            entry >=
+            previous20high * 0.98
+        )
+
+        filter6_breakout = (
+            entry >
+            previous20high
+        )
+
+        filters = [
+            filter1_trend,
+            filter2_ema,
+            filter3_rsi,
+            filter4_volume,
+            filter5_resistance,
+            filter6_breakout
+        ]
+
+        passed = sum(
+            filters
+        )
+
+        if passed != 6:
+            return None
+
+        # ====================================================
+        # TRADE SETUP
+        # ====================================================
+
+        support = max(
+            float(last["Low10"]),
+            float(last["Low20"])
+        )
+
+        sl = support * 0.99
+
+        risk_per_share = (
+            entry - sl
+        )
+
+        if risk_per_share <= 0:
+            return None
+
+        quantity = int(
+            CAPITAL_RISK /
+            risk_per_share
+        )
+
+        if quantity < 1:
+            return None
+
+        actual_risk = (
+            risk_per_share *
+            quantity
+        )
+
+        if actual_risk > CAPITAL_RISK:
+            return None
+
+        # 1:2
+        t1 = (
+            entry +
+            risk_per_share * 2
+        )
+
+        # 1:3
+        t2 = (
+            entry +
+            risk_per_share * 3
+        )
+
+        return {
+
+            "symbol": symbol,
+
+            "entry": round(
+                entry,
+                2
+            ),
+
+            "support": round(
+                support,
+                2
+            ),
+
+            "sl": round(
+                sl,
+                2
+            ),
+
+            "t1": round(
+                t1,
+                2
+            ),
+
+            "t2": round(
+                t2,
+                2
+            ),
+
+            "qty": quantity,
+
+            "risk": round(
+                actual_risk,
+                2
+            ),
+
+            "rsi": round(
+                rsi,
+                2
+            ),
+
+            "volume_ratio": round(
+                volume / volume20,
+                2
+            )
+        }
+
+    except Exception:
+
+        return None
 
 
-print()
-print("================================")
-print("SCAN COMPLETE")
-print("================================")
+# ============================================================
+# 7. SCAN ALL FUNDAMENTAL STOCKS
+# ============================================================
 
-print("Processed:", len(symbols))
-print("Errors:", errors)
-print()
+def run_scan(nse_stocks):
 
-print(
-    "FINAL TRADE SETUPS:",
-    len(signals)
-)
+    print("--------------------------------")
+    print("STEP 3: TECHNICAL 6/6 SCAN")
+    print("--------------------------------")
 
-print("--------------------------------")
+    setups = []
 
-for symbol, setup in signals:
+    total = len(nse_stocks)
+
+    for index, item in enumerate(
+        nse_stocks,
+        start=1
+    ):
+
+        symbol = item["symbol"]
+
+        print(
+            f"[{index}/{total}] {symbol}"
+        )
+
+        df = get_yahoo_data(
+            symbol
+        )
+
+        if df is None:
+            continue
+
+        result = technical_scan(
+            symbol,
+            df
+        )
+
+        if result:
+
+            setups.append(
+                result
+            )
+
+        # Small delay
+        time.sleep(0.15)
+
+    return setups
+
+
+# ============================================================
+# 8. FINAL OUTPUT
+# ============================================================
+
+def print_results(setups):
+
+    print()
+    print("================================")
+    print("FINAL TRADE SETUPS")
+    print("================================")
+
+    if not setups:
+
+        print(
+            "NO STOCK PASSED ALL 6 FILTERS"
+        )
+
+        print(
+            "Fundamental filter: Screener"
+        )
+
+        print(
+            "Technical filter: 6/6"
+        )
+
+        print(
+            "Risk per trade: Rs.300"
+        )
+
+        return
 
     print(
-        f"{symbol} | "
-        f"Entry: {setup['entry']} | "
-        f"Support: {setup['support']} | "
-        f"SL: {setup['sl']} | "
-        f"T1: {setup['target1']} | "
-        f"T2: {setup['target2']} | "
-        f"Qty: {setup['quantity']} | "
-        f"Risk: {setup['risk']}"
+        f"FINAL TRADE SETUPS: {len(setups)}"
     )
+
+    print("--------------------------------")
+
+    for x in setups:
+
+        print(
+            f"{x['symbol']} | "
+            f"Entry: {x['entry']} | "
+            f"Support: {x['support']} | "
+            f"SL: {x['sl']} | "
+            f"T1: {x['t1']} | "
+            f"T2: {x['t2']} | "
+            f"Qty: {x['qty']} | "
+            f"Risk: {x['risk']} | "
+            f"RSI: {x['rsi']} | "
+            f"Vol: {x['volume_ratio']}x"
+        )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print()
+    print("================================")
+    print("NSE SWING SCANNER")
+    print("================================")
+
+    # 1. Screener fundamental universe
+    companies = get_screener_companies()
+
+    if not companies:
+
+        print(
+            "ERROR: Screener se stocks nahi mile."
+        )
+
+        raise SystemExit(1)
+
+    # 2. Convert Screener companies
+    #    into NSE symbols
+    nse_stocks = get_nse_symbols(
+        companies
+    )
+
+    if not nse_stocks:
+
+        print(
+            "ERROR: NSE symbols nahi mile."
+        )
+
+        raise SystemExit(1)
+
+    # 3. Technical scan
+    setups = run_scan(
+        nse_stocks
+    )
+
+    # 4. Final result
+    print_results(
+        setups
+    )
+
+
+if __name__ == "__main__":
+    main()
