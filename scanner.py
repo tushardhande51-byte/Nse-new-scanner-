@@ -1,1075 +1,577 @@
-print("========================================")
-print("STARTING NSE SWING SCANNER")
-print("========================================")
-
 import os
-import sys
+import re
 import time
+from datetime import datetime, timezone
+
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 
+SCREENER_URL = "https://www.screener.in/screens/4008468/tushar-dhande/"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-# =========================================================
-# SETTINGS
-# =========================================================
+EMA_FAST = 20
+EMA_SLOW = 50
+RSI_PERIOD = 14
+VOLUME_LOOKBACK = 20
+VOLUME_MULTIPLIER = 1.5
+RESISTANCE_LOOKBACK = 20
+RESISTANCE_TOLERANCE = 0.98
 
-SCREENER_URL = (
-    "https://www.screener.in/screens/"
-    "4008468/tushar-dhande/"
-)
+STOPLOSS_PCT = 0.05
+TARGET_PCT = 0.10
 
-TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN"
-)
-
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID"
-)
+REQUEST_TIMEOUT = 20
+SLEEP_BETWEEN_REQUESTS = 0.15
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 "
-        "(Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/140.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0 Safari/537.36"
     )
 }
 
 
-# =========================================================
-# VERSION / BASIC TEST
-# =========================================================
-
-print(
-    "Python:",
-    sys.version.split()[0]
-)
-
-print(
-    "Pandas:",
-    pd.__version__
-)
-
-print(
-    "Requests:",
-    requests.__version__
-)
+def get_session():
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    return session
 
 
-# =========================================================
-# INTERNET TEST
-# =========================================================
-
-def internet_test():
-
-    print("\n========================================")
-    print("INTERNET TEST")
-    print("========================================")
-
+def test_internet(session):
     try:
-
-        r = requests.get(
-            "https://www.google.com",
-            headers=HEADERS,
-            timeout=15
-        )
-
-        print(
-            "Google status:",
-            r.status_code
-        )
-
-        if r.status_code == 200:
-
-            print(
-                "Internet: OK"
-            )
-
-            return True
-
-        print(
-            "Internet: FAILED"
-        )
-
-        return False
-
-    except Exception as e:
-
-        print(
-            "Internet ERROR:",
-            e
-        )
-
+        response = session.get("https://www.google.com", timeout=REQUEST_TIMEOUT)
+        print(f"Internet test: HTTP {response.status_code}")
+        return response.ok
+    except Exception as exc:
+        print(f"Internet test failed: {exc}")
         return False
 
 
-# =========================================================
-# SCREENER TEST
-# =========================================================
+def extract_symbol_from_row(row):
+    link = row.find("a")
+    if not link:
+        return None, None
 
-def screener_test():
+    name = link.get_text(" ", strip=True)
+    href = link.get("href", "")
 
-    print("\n========================================")
-    print("SCREENER TEST")
+    match = re.search(r"/company/([^/]+)/", href)
+    if match:
+        slug = match.group(1).strip().upper()
+    else:
+        slug = None
+
+    return name, slug
+
+
+def get_screener_stocks(session):
+    print("")
     print("========================================")
+    print("STAGE 1 - SCREENER FUNDAMENTAL SCREEN")
+    print("========================================")
+    print(f"URL: {SCREENER_URL}")
 
     try:
-
-        r = requests.get(
+        response = session.get(
             SCREENER_URL,
-            headers=HEADERS,
-            timeout=20
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
         )
+        print(f"Screener HTTP: {response.status_code}")
 
-        print(
-            "Screener status:",
-            r.status_code
-        )
+        if response.status_code != 200:
+            return []
 
-        print(
-            "Response length:",
-            len(r.text)
-        )
+        soup = BeautifulSoup(response.text, "html.parser")
+        table = soup.select_one("table.data-table")
 
-        if r.status_code == 200:
+        if not table:
+            print("Screener table not found.")
+            return []
 
-            print(
-                "Screener: OK"
-            )
+        stocks = []
+        seen = set()
 
-            return True
+        for row in table.select("tbody tr"):
+            name, symbol = extract_symbol_from_row(row)
 
-        print(
-            "Screener: FAILED"
-        )
-
-        return False
-
-    except Exception as e:
-
-        print(
-            "Screener ERROR:",
-            e
-        )
-
-        return False
-
-
-# =========================================================
-# GET FUNDAMENTAL STOCKS
-# =========================================================
-
-def get_screener_stocks():
-
-    print("\n========================================")
-    print("GETTING FUNDAMENTAL STOCKS")
-    print("========================================")
-
-    stocks = []
-
-    # Screener currently returns approximately
-    # 151 stocks across these pages.
-
-    for page in range(1, 20):
-
-        try:
-
-            if page == 1:
-
-                url = SCREENER_URL
-
-            else:
-
-                url = (
-                    SCREENER_URL
-                    + f"?page={page}"
-                )
-
-            r = requests.get(
-                url,
-                headers=HEADERS,
-                timeout=20
-            )
-
-            print(
-                f"Page {page}: "
-                f"HTTP {r.status_code}"
-            )
-
-            if r.status_code != 200:
-
+            if not name or not symbol:
                 continue
 
-            soup = BeautifulSoup(
-                r.text,
-                "html.parser"
-            )
-
-            rows = soup.select(
-                "table.data-table tbody tr"
-            )
-
-            if not rows:
-
+            key = symbol.upper()
+            if key in seen:
                 continue
 
-            for row in rows:
+            seen.add(key)
+            stocks.append({
+                "name": name,
+                "symbol": key,
+            })
 
-                link = row.select_one(
-                    "a[href*='/company/']"
-                )
+        print(f"Fundamental stocks found: {len(stocks)}")
+        return stocks
 
-                if not link:
+    except Exception as exc:
+        print(f"Screener error: {exc}")
+        return []
 
-                    continue
-
-                name = link.get_text(
-                    " ",
-                    strip=True
-                )
-
-                href = link.get(
-                    "href",
-                    ""
-                )
-
-                if not href:
-
-                    continue
-
-                # Extract Screener company slug
-                #
-                # Example:
-                # /company/SPARC/
-                #
-                parts = href.split(
-                    "/company/"
-                )
-
-                if len(parts) < 2:
-
-                    continue
-
-                symbol = (
-                    parts[1]
-                    .split("/")[0]
-                    .strip()
-                )
-
-                if not symbol:
-
-                    continue
-
-                stocks.append({
-                    "name": name,
-                    "symbol": symbol
-                })
-
-        except Exception as e:
-
-            print(
-                f"Page {page} ERROR:",
-                e
-            )
-
-    # -----------------------------------------------------
-    # REMOVE DUPLICATES
-    # -----------------------------------------------------
-
-    unique = {}
-
-    for stock in stocks:
-
-        symbol = stock["symbol"]
-
-        if symbol not in unique:
-
-            unique[symbol] = stock
-
-    stocks = list(
-        unique.values()
-    )
-
-    print("\n========================================")
-    print("FUNDAMENTAL RESULT")
-    print("========================================")
-
-    print(
-        "Total fundamental stocks:",
-        len(stocks)
-    )
-
-    print(
-        "\nFirst 15 stocks:"
-    )
-
-    for stock in stocks[:15]:
-
-        print(
-            stock["symbol"],
-            "|",
-            stock["name"]
-        )
-
-    return stocks
-
-
-# =========================================================
-# PREPARE NSE SYMBOLS
-# =========================================================
 
 def prepare_nse_stocks(stocks):
-
-    print("\n========================================")
+    print("")
+    print("========================================")
     print("PREPARING NSE SYMBOLS")
     print("========================================")
 
     valid = []
+    skipped_numeric = []
 
-    skipped = []
+    for item in stocks:
+        symbol = item["symbol"].strip().upper()
 
-    for stock in stocks:
-
-        symbol = (
-            stock["symbol"]
-            .strip()
-            .upper()
-        )
-
-        # -------------------------------------------------
-        # NUMERIC SYMBOL = BSE SECURITY CODE
-        # -------------------------------------------------
-
+        # Screener can expose BSE security codes such as 532015.
+        # Yahoo Finance cannot use these directly as NSE tickers.
         if symbol.isdigit():
-
-            print(
-                f"SKIP BSE CODE: {symbol}"
-            )
-
-            skipped.append(symbol)
-
+            skipped_numeric.append(symbol)
+            print(f"SKIP BSE CODE: {symbol}")
             continue
 
-        # -------------------------------------------------
-        # VALID SYMBOL
-        # -------------------------------------------------
+        if not re.fullmatch(r"[A-Z0-9&._-]+", symbol):
+            print(f"SKIP INVALID SYMBOL: {symbol}")
+            continue
 
-        stock["nse_symbol"] = symbol
+        item = dict(item)
+        item["yahoo_symbol"] = f"{symbol}.NS"
+        valid.append(item)
 
-        valid.append(stock)
-
-    print("\n----------------------------------------")
-
-    print(
-        "Fundamental stocks:",
-        len(stocks)
-    )
-
-    print(
-        "Valid NSE-style symbols:",
-        len(valid)
-    )
-
-    print(
-        "Skipped numeric BSE codes:",
-        len(skipped)
-    )
-
-    print("----------------------------------------")
-
+    print(f"Valid NSE-style symbols: {len(valid)}")
+    print(f"Numeric BSE codes skipped: {len(skipped_numeric)}")
     return valid
 
 
-# =========================================================
-# YAHOO PRICE DATA
-# =========================================================
-
-def get_price_data(symbol):
-
-    symbol = (
-        symbol
-        .strip()
-        .upper()
+def yahoo_chart_url(yahoo_symbol):
+    return (
+        "https://query1.finance.yahoo.com/v8/finance/chart/"
+        f"{yahoo_symbol}?range=1y&interval=1d&events=history"
     )
 
-    # Remove exchange suffix if present
 
-    if symbol.endswith(".NS"):
-
-        symbol = symbol[:-3]
-
-    if symbol.endswith(".BO"):
-
-        symbol = symbol[:-3]
-
-    # Never query numeric BSE code
-
-    if symbol.isdigit():
-
-        return None
-
-    yahoo_symbol = (
-        symbol + ".NS"
-    )
-
-    url = (
-        "https://query1.finance.yahoo.com"
-        "/v8/finance/chart/"
-        + yahoo_symbol
-    )
-
-    params = {
-        "range": "6mo",
-        "interval": "1d"
-    }
-
+def get_price_data(session, yahoo_symbol):
     try:
-
-        r = requests.get(
-            url,
-            params=params,
-            headers=HEADERS,
-            timeout=20
+        response = session.get(
+            yahoo_chart_url(yahoo_symbol),
+            timeout=REQUEST_TIMEOUT,
         )
 
-        if r.status_code != 200:
-
-            print(
-                f"{symbol} -> "
-                f"Yahoo HTTP "
-                f"{r.status_code}"
-            )
-
+        if response.status_code != 200:
+            print(f"{yahoo_symbol} -> Yahoo HTTP {response.status_code}")
             return None
 
-        data = r.json()
-
-        chart = data.get(
-            "chart",
-            {}
-        )
-
-        result = chart.get(
-            "result"
-        )
+        payload = response.json()
+        chart = payload.get("chart", {})
+        result = chart.get("result")
 
         if not result:
-
-            print(
-                f"{symbol} -> "
-                "Yahoo no result"
-            )
-
+            print(f"{yahoo_symbol} -> no Yahoo result")
             return None
 
         result = result[0]
+        timestamps = result.get("timestamp", [])
+        quote_list = result.get("indicators", {}).get("quote", [])
 
-        timestamps = result.get(
-            "timestamp",
-            []
-        )
-
-        indicators = result.get(
-            "indicators",
-            {}
-        )
-
-        quotes = indicators.get(
-            "quote",
-            []
-        )
-
-        if not timestamps:
-
+        if not timestamps or not quote_list:
+            print(f"{yahoo_symbol} -> no OHLC data")
             return None
 
-        if not quotes:
-
-            return None
-
-        quote = quotes[0]
+        quote = quote_list[0]
 
         df = pd.DataFrame({
             "timestamp": timestamps,
-            "open": quote.get(
-                "open"
-            ),
-            "high": quote.get(
-                "high"
-            ),
-            "low": quote.get(
-                "low"
-            ),
-            "close": quote.get(
-                "close"
-            ),
-            "volume": quote.get(
-                "volume"
-            )
+            "open": quote.get("open", []),
+            "high": quote.get("high", []),
+            "low": quote.get("low", []),
+            "close": quote.get("close", []),
+            "volume": quote.get("volume", []),
         })
 
-        df["date"] = pd.to_datetime(
-            df["timestamp"],
-            unit="s"
-        )
+        if df.empty:
+            return None
 
-        df = df.dropna(
-            subset=[
-                "close",
-                "high",
-                "volume"
-            ]
-        )
+        df["date"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
+        df = df.drop(columns=["timestamp"])
+        df = df.dropna(subset=["close", "high", "low", "volume"])
+        df = df.sort_values("date").reset_index(drop=True)
 
-        # Need enough history for
-        # EMA50 + RSI + 20-day calculations
-
-        if len(df) < 60:
-
-            print(
-                f"{symbol} -> "
-                f"Only {len(df)} rows"
-            )
-
+        if len(df) < 100:
+            print(f"{yahoo_symbol} -> insufficient data: {len(df)} rows")
             return None
 
         return df
 
-    except Exception as e:
-
-        print(
-            f"{symbol} -> "
-            f"Yahoo ERROR: {e}"
-        )
-
+    except Exception as exc:
+        print(f"{yahoo_symbol} -> data error: {exc}")
         return None
 
 
-# =========================================================
-# PRICE DATA TEST
-# =========================================================
+def calculate_rsi(series, period=14):
+    delta = series.diff()
 
-def price_data_test(stocks):
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-    print("\n========================================")
+    avg_gain = gain.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False,
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / period,
+        min_periods=period,
+        adjust=False,
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    rsi = 100 - (100 / (1 + rs))
+
+    # Handle periods with no losses.
+    rsi = rsi.fillna(100)
+    return rsi
+
+
+def add_indicators(df):
+    data = df.copy()
+
+    data["ema20"] = data["close"].ewm(
+        span=EMA_FAST,
+        adjust=False,
+    ).mean()
+
+    data["ema50"] = data["close"].ewm(
+        span=EMA_SLOW,
+        adjust=False,
+    ).mean()
+
+    data["rsi14"] = calculate_rsi(data["close"], RSI_PERIOD)
+
+    data["volume_avg20"] = data["volume"].rolling(
+        VOLUME_LOOKBACK
+    ).mean()
+
+    # Previous 20-day high excludes today's candle.
+    data["previous_20_high"] = data["high"].shift(1).rolling(
+        RESISTANCE_LOOKBACK
+    ).max()
+
+    return data
+
+
+def check_six_filters(df):
+    if df is None or len(df) < 100:
+        return None
+
+    data = add_indicators(df)
+    latest = data.iloc[-1]
+
+    required = [
+        latest["close"],
+        latest["ema20"],
+        latest["ema50"],
+        latest["rsi14"],
+        latest["volume"],
+        latest["volume_avg20"],
+        latest["previous_20_high"],
+    ]
+
+    if any(pd.isna(value) for value in required):
+        return None
+
+    close = float(latest["close"])
+    ema20 = float(latest["ema20"])
+    ema50 = float(latest["ema50"])
+    rsi = float(latest["rsi14"])
+    volume = float(latest["volume"])
+    volume_avg20 = float(latest["volume_avg20"])
+    previous_20_high = float(latest["previous_20_high"])
+
+    filters = {
+        "Trend": close > ema20 and ema20 > ema50,
+        "EMA": close > ema20,
+        "RSI": 55 <= rsi <= 70,
+        "Volume": volume > volume_avg20 * VOLUME_MULTIPLIER,
+        "Resistance": close >= previous_20_high * RESISTANCE_TOLERANCE,
+        "Breakout": close > previous_20_high,
+    }
+
+    passed = sum(filters.values())
+
+    if passed != 6:
+        return {
+            "passed": passed,
+            "filters": filters,
+            "close": close,
+            "ema20": ema20,
+            "ema50": ema50,
+            "rsi": rsi,
+            "volume": volume,
+            "volume_avg20": volume_avg20,
+            "previous_20_high": previous_20_high,
+        }
+
+    entry = close
+    stoploss = entry * (1 - STOPLOSS_PCT)
+    target = entry * (1 + TARGET_PCT)
+
+    return {
+        "passed": 6,
+        "filters": filters,
+        "close": close,
+        "ema20": ema20,
+        "ema50": ema50,
+        "rsi": rsi,
+        "volume": volume,
+        "volume_avg20": volume_avg20,
+        "previous_20_high": previous_20_high,
+        "entry": entry,
+        "stoploss": stoploss,
+        "target": target,
+    }
+
+
+def price_data_test(session, stocks, count=5):
+    print("")
+    print("========================================")
     print("PRICE DATA TEST")
     print("========================================")
 
-    test_stocks = stocks[:5]
-
-    if not test_stocks:
-
-        print(
-            "No stocks available for test."
-        )
-
+    if not stocks:
+        print("No valid stocks to test.")
         return 0
 
+    test_stocks = stocks[:count]
     success = 0
 
-    for stock in test_stocks:
+    for item in test_stocks:
+        symbol = item["yahoo_symbol"]
+        df = get_price_data(session, symbol)
 
-        symbol = stock[
-            "nse_symbol"
-        ]
-
-        print(
-            f"\nTesting "
-            f"{symbol} -> "
-            f"{symbol}.NS"
-        )
-
-        df = get_price_data(
-            symbol
-        )
-
-        if df is not None:
-
+        if df is not None and not df.empty:
             success += 1
-
-            latest_close = (
-                df.iloc[-1]["close"]
-            )
-
-            print(
-                f"OK | "
-                f"Rows: {len(df)} | "
-                f"Latest close: "
-                f"₹{latest_close:.2f}"
-            )
-
+            print(f"{symbol} -> OK ({len(df)} rows)")
         else:
+            print(f"{symbol} -> FAILED")
 
-            print(
-                "FAILED"
-            )
+        time.sleep(SLEEP_BETWEEN_REQUESTS)
 
-        time.sleep(0.5)
-
-    print(
-        "\n----------------------------------------"
-    )
-
-    print(
-        f"Price data test: "
-        f"{success}/{len(test_stocks)}"
-    )
-
-    print(
-        "----------------------------------------"
-    )
-
+    print(f"Price data test: {success}/{len(test_stocks)}")
     return success
 
 
-# =========================================================
-# TECHNICAL 6/6 CHECK
-# =========================================================
-
-def technical_check(df):
-
-    try:
-
-        df = df.copy()
-
-        # =================================================
-        # EMA20
-        # =================================================
-
-        df["EMA20"] = (
-            df["close"]
-            .ewm(
-                span=20,
-                adjust=False
-            )
-            .mean()
-        )
-
-        # =================================================
-        # EMA50
-        # =================================================
-
-        df["EMA50"] = (
-            df["close"]
-            .ewm(
-                span=50,
-                adjust=False
-            )
-            .mean()
-        )
-
-        # =================================================
-        # RSI14
-        # =================================================
-
-        delta = (
-            df["close"]
-            .diff()
-        )
-
-        gain = (
-            delta
-            .clip(lower=0)
-        )
-
-        loss = (
-            -delta
-            .clip(upper=0)
-        )
-
-        avg_gain = (
-            gain
-            .rolling(14)
-            .mean()
-        )
-
-        avg_loss = (
-            loss
-            .rolling(14)
-            .mean()
-        )
-
-        rs = (
-            avg_gain /
-            avg_loss
-        )
-
-        df["RSI"] = (
-            100 -
-            (
-                100 /
-                (1 + rs)
-            )
-        )
-
-        # =================================================
-        # 20-DAY AVERAGE VOLUME
-        # =================================================
-
-        df["VOL20"] = (
-            df["volume"]
-            .rolling(20)
-            .mean()
-        )
-
-        # =================================================
-        # PREVIOUS 20-DAY HIGH
-        # =================================================
-
-        df["PREV20HIGH"] = (
-            df["high"]
-            .shift(1)
-            .rolling(20)
-            .max()
-        )
-
-        latest = df.iloc[-1]
-
-        close = latest[
-            "close"
-        ]
-
-        ema20 = latest[
-            "EMA20"
-        ]
-
-        ema50 = latest[
-            "EMA50"
-        ]
-
-        rsi = latest[
-            "RSI"
-        ]
-
-        volume = latest[
-            "volume"
-        ]
-
-        vol20 = latest[
-            "VOL20"
-        ]
-
-        prev20high = latest[
-            "PREV20HIGH"
-        ]
-
-        values = [
-            close,
-            ema20,
-            ema50,
-            rsi,
-            volume,
-            vol20,
-            prev20high
-        ]
-
-        if any(
-            pd.isna(x)
-            for x in values
-        ):
-
-            return False, None
-
-        # =================================================
-        # 6 FILTERS
-        # =================================================
-
-        # FILTER 1
-        # Trend:
-        # Close > EMA20 > EMA50
-
-        filter1 = (
-            close >
-            ema20 >
-            ema50
-        )
-
-        # FILTER 2
-        # EMA:
-        # Close > EMA20
-
-        filter2 = (
-            close >
-            ema20
-        )
-
-        # FILTER 3
-        # RSI:
-        # 55 to 70
-
-        filter3 = (
-            55 <=
-            rsi <=
-            70
-        )
-
-        # FILTER 4
-        # Volume:
-        # Today > 1.5x 20-day average
-
-        filter4 = (
-            volume >
-            vol20 * 1.5
-        )
-
-        # FILTER 5
-        # Resistance:
-        # Within 2% of previous 20-day high
-
-        filter5 = (
-            close >=
-            prev20high * 0.98
-        )
-
-        # FILTER 6
-        # Breakout:
-        # Close above previous 20-day high
-
-        filter6 = (
-            close >
-            prev20high
-        )
-
-        # =================================================
-        # FINAL 6/6
-        # =================================================
-
-        passed = all([
-            filter1,
-            filter2,
-            filter3,
-            filter4,
-            filter5,
-            filter6
-        ])
-
-        if not passed:
-
-            return False, None
-
-        # =================================================
-        # TRADE LEVELS
-        # =================================================
-
-        entry = float(
-            close
-        )
-
-        stoploss = (
-            entry * 0.95
-        )
-
-        target = (
-            entry * 1.10
-        )
-
-        result = {
-
-            "entry": entry,
-
-            "stoploss": stoploss,
-
-            "target": target,
-
-            "rsi": float(rsi)
-
-        }
-
-        return True, result
-
-    except Exception as e:
-
-        print(
-            "Technical ERROR:",
-            e
-        )
-
-        return False, None
-
-
-# =========================================================
-# TELEGRAM
-# =========================================================
-
-def send_telegram(message):
-
-    print("\n========================================")
-    print("TELEGRAM")
+def scan_stocks(session, stocks):
+    print("")
+    print("========================================")
+    print("STAGE 2 - TECHNICAL 6/6 SCAN")
     print("========================================")
 
-    if not TELEGRAM_BOT_TOKEN:
+    results = []
+    total = len(stocks)
+
+    for index, item in enumerate(stocks, start=1):
+        name = item["name"]
+        symbol = item["symbol"]
+        yahoo_symbol = item["yahoo_symbol"]
+
+        print(f"[{index}/{total}] {symbol}")
+
+        df = get_price_data(session, yahoo_symbol)
+
+        if df is None:
+            time.sleep(SLEEP_BETWEEN_REQUESTS)
+            continue
+
+        result = check_six_filters(df)
+
+        if result is None:
+            print(f"{symbol} -> insufficient indicator data")
+            time.sleep(SLEEP_BETWEEN_REQUESTS)
+            continue
 
         print(
-            "ERROR: "
-            "TELEGRAM_BOT_TOKEN missing"
+            f"{symbol} -> {result['passed']}/6 "
+            f"(RSI {result['rsi']:.2f})"
         )
 
-        return
+        if result["passed"] == 6:
+            results.append({
+                "name": name,
+                "symbol": symbol,
+                "entry": result["entry"],
+                "stoploss": result["stoploss"],
+                "target": result["target"],
+                "rsi": result["rsi"],
+            })
 
-    if not TELEGRAM_CHAT_ID:
+        time.sleep(SLEEP_BETWEEN_REQUESTS)
 
-        print(
-            "ERROR: "
-            "TELEGRAM_CHAT_ID missing"
-        )
+    return results
 
-        return
+
+def format_price(value):
+    return f"â‚¹{value:,.2f}"
+
+
+def build_telegram_message(results):
+    today = datetime.now(timezone.utc).strftime("%d-%m-%Y")
+
+    lines = [
+        "ðŸš€ NSE SWING SCANNER",
+        "",
+        f"Date: {today}",
+        "Fundamental: Screener",
+        "Technical: 6/6 filters",
+        "",
+    ]
+
+    if not results:
+        lines.extend([
+            "âŒ No 6/6 stock found.",
+            "",
+            "Filters:",
+            "1. Close > EMA20 > EMA50",
+            "2. Close > EMA20",
+            "3. RSI 55-70",
+            "4. Volume > 20D average Ã— 1.5",
+            "5. Near previous 20D resistance",
+            "6. Breakout above previous 20D high",
+        ])
+        return "\n".join(lines)
+
+    lines.append(f"âœ… FINAL BUY COUNT: {len(results)}")
+    lines.append("")
+
+    for number, item in enumerate(results, start=1):
+        lines.extend([
+            f"{number}. {item['symbol']} - {item['name']}",
+            f"Entry: {format_price(item['entry'])}",
+            f"Stoploss: {format_price(item['stoploss'])}",
+            f"Target: {format_price(item['target'])}",
+            f"RSI: {item['rsi']:.2f}",
+            "",
+        ])
+
+    return "\n".join(lines)
+
+
+def send_telegram(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram secrets are not configured.")
+        print("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.")
+        return False
 
     url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}"
-        "/sendMessage"
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
+        "text": message,
     }
 
     try:
-
-        r = requests.post(
+        response = requests.post(
             url,
-            data=payload,
-            timeout=20
+            json=payload,
+            timeout=REQUEST_TIMEOUT,
         )
 
-        print(
-            "Telegram status:",
-            r.status_code
-        )
+        print(f"Telegram HTTP: {response.status_code}")
 
-        print(
-            "Telegram response:",
-            r.text[:300]
-        )
+        if response.ok:
+            print("Telegram message sent successfully.")
+            return True
 
-    except Exception as e:
+        print(f"Telegram error: {response.text}")
+        return False
 
-        print(
-            "Telegram ERROR:",
-            e
-        )
+    except Exception as exc:
+        print(f"Telegram send error: {exc}")
+        return False
 
 
-# =========================================================
-# MAIN
-# =========================================================
-
-def main():
-
-    print("\n========================================")
-    print("NSE SWING SCANNER STARTED")
+def print_final_report(results):
+    print("")
+    print("========================================")
+    print("FINAL TECHNICAL REPORT")
     print("========================================")
 
-    # -----------------------------------------------------
-    # INTERNET
-    # -----------------------------------------------------
-
-    if not internet_test():
-
-        print(
-            "\nSTOP: Internet unavailable."
-        )
-
+    if not results:
+        print("No 6/6 stock found.")
         return
 
-    # -----------------------------------------------------
-    # SCREENER
-    # -----------------------------------------------------
+    print(f"FINAL BUY COUNT: {len(results)}")
+    print("")
 
-    if not screener_test():
+    for number, item in enumerate(results, start=1):
+        print(f"{number}. {item['symbol']} - {item['name']}")
+        print(f"   Entry    : {format_price(item['entry'])}")
+        print(f"   Stoploss : {format_price(item['stoploss'])}")
+        print(f"   Target   : {format_price(item['target'])}")
+        print(f"   RSI      : {item['rsi']:.2f}")
+        print("")
 
-        print(
-            "\nSTOP: Screener unavailable."
-        )
 
+def main():
+    print("========================================")
+    print("NSE SWING SCANNER")
+    print("========================================")
+    print("Strategy: Fundamental + Technical 6/6")
+    print("Timeframe: Daily")
+    print("Capital calculation: OFF")
+    print("Quantity calculation: OFF")
+    print("Risk calculation: OFF")
+    print("")
+
+    session = get_session()
+
+    if not test_internet(session):
+        print("Internet connection failed. Stopping.")
         return
 
-    # -----------------------------------------------------
-    # FUNDAMENTAL STAGE
-    # -----------------------------------------------------
+    fundamental_stocks = get_screener_stocks(session)
 
-    stocks = (
-        get_screener_stocks()
-    )
-
-    if not stocks:
-
-        print(
-            "\nSTOP: "
-            "No fundamental stocks found."
-        )
-
+    if not fundamental_stocks:
+        print("No fundamental stocks found. Stopping.")
         return
 
-    print(
-        "\nFundamental stocks:",
-        len(stocks)
-    )
+    nse_stocks = prepare_nse_stocks(fundamental_stocks)
 
-    # -----------------------------------------------------
-    # PREPARE NSE SYMBOLS
-    # -----------------------------------------------------
-
-    stocks = (
-        prepare_nse_stocks(
-            stocks
-        )
-    )
-
-    if not stocks:
-
-        print(
-            "\nSTOP: "
-            "No NSE-style symbols found."
-        )
-
+    if not nse_stocks:
+        print("No valid NSE symbols available. Stopping.")
         return
 
-    print(
-        "\nStocks entering technical stage:",
-        len(stocks)
-    )
+    test_success = price_data_test(session, nse_stocks, count=5)
 
-    # -----------------------------------------------------
-    # PRICE TEST
-    # -----------------------------------------------------
-
-    price_success = (
-        price_data_test(
-            stocks
-        )
-    )
-
-    if price_success == 0:
-
-        print(
-            "\n========================================"
-        )
-
-        print(
-            "STOP: "
-            "NO PRICE DATA"
-        )
-
-        print(
-            "========================================"
-        )
-
-        send_telegram(
-            "NSE SWING SCANNER\n\n"
-            "⚠️ Price data unavailable.\n"
-            "Technical scan did not start."
-        )
-
+    if test_success == 0:
+        print("")
+        print("No Yahoo price data available for the test symbols.")
+        print("Technical scan stopped.")
         return
 
-    # -----------------------------------------------------
-    # TECHNICAL STAGE
-    # -----------------------------------------------------
+    results = scan_stocks(session, nse_stocks)
 
-    print(
-        "\n============
+    print_final_report(results)
+
+    telegram_message = build_telegram_message(results)
+    send_telegram(telegram_message)
+
+    print("")
+    print("========================================")
+    print("SCAN COMPLETED")
+    print("========================================")
+
+
+if __name__ == "__main__":
+    main()
