@@ -1,143 +1,126 @@
-import os
-import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+print("========================================")
+print("STARTING NSE SWING SCANNER")
+print("========================================")
 
-import pandas as pd
+import os
+import sys
+import time
 import requests
+import pandas as pd
 from bs4 import BeautifulSoup
 
-
-# =========================================================
-# SETTINGS
-# =========================================================
-
 SCREENER_URL = "https://www.screener.in/screens/4008468/tushar-dhande/"
-YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{}.NS"
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 "
-        "(Linux; Android 10) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/154.0 Safari/537.36"
-    )
-}
-
-MAX_WORKERS = 6
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
 # =========================================================
-# TELEGRAM
+# 1. BASIC TEST
 # =========================================================
 
-def send_telegram(message):
+print("Python version:", sys.version)
+print("Pandas version:", pd.__version__)
+print("Requests version:", requests.__version__)
 
-    if not TELEGRAM_TOKEN:
-        print("Telegram token missing")
-        return False
 
-    if not TELEGRAM_CHAT_ID:
-        print("Telegram chat ID missing")
-        return False
+# =========================================================
+# 2. INTERNET TEST
+# =========================================================
 
-    url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/sendMessage"
-    )
+def internet_test():
+    print("\n========================================")
+    print("INTERNET TEST")
+    print("========================================")
 
     try:
-
-        response = requests.post(
-            url,
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message
-            },
-            timeout=20
+        r = requests.get(
+            "https://www.google.com",
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"}
         )
 
-        print(
-            "Telegram status:",
-            response.status_code
+        print("Google status:", r.status_code)
+
+    except Exception as e:
+        print("Google FAILED:", e)
+
+
+# =========================================================
+# 3. SCREENER TEST
+# =========================================================
+
+def screener_test():
+    print("\n========================================")
+    print("SCREENER TEST")
+    print("========================================")
+
+    try:
+        r = requests.get(
+            SCREENER_URL,
+            timeout=20,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
         )
 
-        if response.ok:
-            print("Telegram: SENT")
+        print("Screener status:", r.status_code)
+        print("Screener response length:", len(r.text))
+
+        if r.status_code == 200:
+            print("SCREENER: OK")
             return True
 
-        print(
-            "Telegram error:",
-            response.text
-        )
-
+        print("SCREENER: FAILED")
         return False
 
     except Exception as e:
-
-        print(
-            "Telegram exception:",
-            e
-        )
-
+        print("Screener FAILED:", e)
         return False
 
 
 # =========================================================
-# STAGE 1
-# SCREENER FUNDAMENTAL STOCKS
+# 4. GET FUNDAMENTAL STOCKS
 # =========================================================
 
 def get_screener_stocks():
 
     print("\n========================================")
-    print("STAGE 1: FUNDAMENTAL SCREEN")
+    print("GETTING FUNDAMENTAL STOCKS")
     print("========================================")
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
     stocks = []
-    seen = set()
 
     for page in range(1, 20):
 
-        if page == 1:
-            url = SCREENER_URL
-        else:
-            url = (
-                SCREENER_URL
-                + f"?page={page}"
-            )
-
         try:
 
-            response = session.get(
+            url = SCREENER_URL
+
+            if page > 1:
+                url = SCREENER_URL + f"?page={page}"
+
+            r = requests.get(
                 url,
-                timeout=30
+                timeout=20,
+                headers={
+                    "User-Agent": "Mozilla/5.0"
+                }
             )
 
             print(
-                f"Page {page}: "
-                f"HTTP {response.status_code}"
+                f"Screener page {page}: "
+                f"status={r.status_code}"
             )
 
-            if response.status_code != 200:
-                break
+            if r.status_code != 200:
+                continue
 
-            soup = BeautifulSoup(
-                response.text,
-                "html.parser"
-            )
+            soup = BeautifulSoup(r.text, "html.parser")
 
             rows = soup.select(
                 "table.data-table tbody tr"
             )
-
-            page_count = 0
 
             for row in rows:
 
@@ -153,214 +136,196 @@ def get_screener_stocks():
                     strip=True
                 )
 
-                href = link.get(
-                    "href",
-                    ""
-                )
+                href = link.get("href", "")
 
-                match = re.search(
-                    r"/company/([^/]+)/",
-                    href
-                )
-
-                if not match:
+                if "/company/" not in href:
                     continue
 
-                symbol = (
-                    match.group(1)
-                    .strip()
-                    .upper()
-                )
+                symbol = href.split("/company/")[1].split("/")[0]
 
-                if not symbol:
-                    continue
+                if symbol:
 
-                if symbol in seen:
-                    continue
-
-                seen.add(symbol)
-
-                stocks.append({
-                    "name": name,
-                    "symbol": symbol
-                })
-
-                page_count += 1
-
-            print(
-                f"Page {page}: "
-                f"{page_count} stocks"
-            )
-
-            if page_count == 0:
-                break
+                    stocks.append({
+                        "name": name,
+                        "symbol": symbol
+                    })
 
         except Exception as e:
 
             print(
-                f"Page {page} error:",
+                f"Screener page {page} ERROR:",
                 e
             )
 
-            break
+    # Remove duplicates
 
-    print()
-    print(
-        "Fundamental PASS:",
-        len(stocks)
-    )
+    unique = {}
+
+    for stock in stocks:
+
+        symbol = stock["symbol"]
+
+        if symbol not in unique:
+            unique[symbol] = stock
+
+    stocks = list(unique.values())
+
+    print("\n========================================")
+    print("FUNDAMENTAL RESULT")
+    print("========================================")
+    print("Stocks found:", len(stocks))
+
+    if stocks:
+
+        print("\nFirst 10 stocks:")
+
+        for stock in stocks[:10]:
+
+            print(
+                stock["symbol"],
+                "|",
+                stock["name"]
+            )
 
     return stocks
 
 
 # =========================================================
-# SYMBOL CONVERSION
-# =========================================================
-
-def make_yahoo_symbol(symbol):
-
-    symbol = (
-        str(symbol)
-        .strip()
-        .upper()
-    )
-
-    # Remove exchange suffix if already present
-    symbol = re.sub(
-        r"\.(NS|BO)$",
-        "",
-        symbol
-    )
-
-    # Yahoo Finance uses hyphen for some symbols
-    symbol = symbol.replace(
-        "&",
-        "%26"
-    )
-
-    return symbol + ".NS"
-
-
-# =========================================================
-# YAHOO PRICE DATA
+# 5. YAHOO PRICE DATA
 # =========================================================
 
 def get_price_data(symbol):
 
+    yahoo_symbol = symbol
+
+    if yahoo_symbol.endswith(".NS"):
+        yahoo_symbol = yahoo_symbol[:-3]
+
+    if yahoo_symbol.endswith(".BO"):
+        yahoo_symbol = yahoo_symbol[:-3]
+
+    yahoo_symbol = yahoo_symbol + ".NS"
+
+    url = (
+        "https://query1.finance.yahoo.com/v8/finance/chart/"
+        + yahoo_symbol
+    )
+
+    params = {
+        "range": "6mo",
+        "interval": "1d"
+    }
+
     try:
 
-        yahoo_symbol = make_yahoo_symbol(
-            symbol
-        )
-
-        url = YAHOO_URL.format(
-            yahoo_symbol
-        )
-
-        response = requests.get(
+        r = requests.get(
             url,
-            params={
-                "range": "6mo",
-                "interval": "1d",
-                "events": "history"
-            },
-            headers=HEADERS,
-            timeout=30
+            params=params,
+            timeout=20,
+            headers={
+                "User-Agent":
+                "Mozilla/5.0"
+            }
         )
 
-        if response.status_code != 200:
+        if r.status_code != 200:
 
             print(
-                f"PRICE ERROR | "
-                f"{symbol} | "
-                f"Yahoo: {yahoo_symbol} | "
-                f"HTTP {response.status_code}"
+                f"{symbol} -> Yahoo HTTP {r.status_code}"
             )
 
             return None
 
-        data = response.json()
+        data = r.json()
 
-        chart = data.get(
-            "chart",
-            {}
-        )
-
-        result = chart.get(
-            "result"
-        )
+        result = data.get("chart", {}).get("result")
 
         if not result:
 
+            print(
+                f"{symbol} -> No Yahoo result"
+            )
+
             return None
 
-        quote = (
-            result[0]
-            .get("indicators", {})
-            .get("quote", [{}])[0]
+        result = result[0]
+
+        timestamps = result.get(
+            "timestamp",
+            []
         )
 
-        df = pd.DataFrame({
+        quote = result.get(
+            "indicators",
+            {}
+        ).get(
+            "quote",
+            []
+        )
 
-            "open": quote.get(
-                "open",
-                []
-            ),
+        if not timestamps or not quote:
 
-            "high": quote.get(
-                "high",
-                []
-            ),
-
-            "low": quote.get(
-                "low",
-                []
-            ),
-
-            "close": quote.get(
-                "close",
-                []
-            ),
-
-            "volume": quote.get(
-                "volume",
-                []
+            print(
+                f"{symbol} -> Empty price data"
             )
+
+            return None
+
+        quote = quote[0]
+
+        df = pd.DataFrame({
+            "timestamp": timestamps,
+            "open": quote.get("open"),
+            "high": quote.get("high"),
+            "low": quote.get("low"),
+            "close": quote.get("close"),
+            "volume": quote.get("volume")
         })
 
-        df = df.dropna()
+        df["date"] = pd.to_datetime(
+            df["timestamp"],
+            unit="s"
+        )
+
+        df = df.dropna(
+            subset=[
+                "close",
+                "high",
+                "volume"
+            ]
+        )
 
         if len(df) < 60:
 
+            print(
+                f"{symbol} -> Only {len(df)} rows"
+            )
+
             return None
 
-        return df.reset_index(
-            drop=True
-        )
+        return df
 
     except Exception as e:
 
         print(
-            f"PRICE EXCEPTION | "
-            f"{symbol} | {e}"
+            f"{symbol} -> PRICE ERROR:",
+            e
         )
 
         return None
 
 
 # =========================================================
-# TEST PRICE DATA
+# 6. PRICE DATA TEST
 # =========================================================
 
-def test_price_connection(
-    fundamental_stocks
-):
+def price_data_test(stocks):
 
     print("\n========================================")
-    print("PRICE DATA CONNECTION TEST")
+    print("PRICE DATA TEST")
     print("========================================")
 
-    test_stocks = fundamental_stocks[:5]
+    test_stocks = stocks[:5]
 
     success = 0
 
@@ -368,710 +333,425 @@ def test_price_connection(
 
         symbol = stock["symbol"]
 
-        yahoo_symbol = make_yahoo_symbol(
-            symbol
+        print(
+            f"\nTesting {symbol}..."
         )
 
-        print()
+        df = get_price_data(symbol)
+
+        if df is not None:
+
+            success += 1
+
+            latest = df.iloc[-1]["close"]
+
+            print(
+                f"OK | Rows: {len(df)} | "
+                f"Latest close: {latest}"
+            )
+
+        else:
+
+            print("FAILED")
+
+        time.sleep(1)
+
+    print("\n----------------------------------------")
+    print(
+        f"Price data test: "
+        f"{success}/{len(test_stocks)}"
+    )
+    print("----------------------------------------")
+
+    return success
+
+
+# =========================================================
+# 7. TECHNICAL 6/6
+# =========================================================
+
+def technical_check(df):
+
+    try:
+
+        df = df.copy()
+
+        # EMA
+
+        df["EMA20"] = (
+            df["close"]
+            .ewm(span=20, adjust=False)
+            .mean()
+        )
+
+        df["EMA50"] = (
+            df["close"]
+            .ewm(span=50, adjust=False)
+            .mean()
+        )
+
+        # RSI
+
+        delta = df["close"].diff()
+
+        gain = delta.clip(lower=0)
+
+        loss = -delta.clip(upper=0)
+
+        avg_gain = (
+            gain.rolling(14)
+            .mean()
+        )
+
+        avg_loss = (
+            loss.rolling(14)
+            .mean()
+        )
+
+        rs = avg_gain / avg_loss
+
+        df["RSI"] = (
+            100 -
+            (100 / (1 + rs))
+        )
+
+        # Volume average
+
+        df["VOL20"] = (
+            df["volume"]
+            .rolling(20)
+            .mean()
+        )
+
+        # Previous 20-day high
+
+        df["PREV20HIGH"] = (
+            df["high"]
+            .shift(1)
+            .rolling(20)
+            .max()
+        )
+
+        latest = df.iloc[-1]
+
+        close = latest["close"]
+
+        ema20 = latest["EMA20"]
+
+        ema50 = latest["EMA50"]
+
+        rsi = latest["RSI"]
+
+        volume = latest["volume"]
+
+        vol20 = latest["VOL20"]
+
+        prev20high = latest["PREV20HIGH"]
+
+        if pd.isna(
+            ema20
+        ) or pd.isna(
+            ema50
+        ) or pd.isna(
+            rsi
+        ) or pd.isna(
+            vol20
+        ) or pd.isna(
+            prev20high
+        ):
+
+            return False, None
+
+        # -------------------------------------------------
+        # 6 FILTERS
+        # -------------------------------------------------
+
+        filter1 = (
+            close >
+            ema20 >
+            ema50
+        )
+
+        filter2 = (
+            close >
+            ema20
+        )
+
+        filter3 = (
+            55 <= rsi <= 70
+        )
+
+        filter4 = (
+            volume >
+            vol20 * 1.5
+        )
+
+        filter5 = (
+            close >=
+            prev20high * 0.98
+        )
+
+        filter6 = (
+            close >
+            prev20high
+        )
+
+        passed = (
+            filter1 and
+            filter2 and
+            filter3 and
+            filter4 and
+            filter5 and
+            filter6
+        )
+
+        if not passed:
+            return False, None
+
+        entry = float(close)
+
+        stoploss = entry * 0.95
+
+        target = entry * 1.10
+
+        result = {
+            "entry": entry,
+            "stoploss": stoploss,
+            "target": target,
+            "rsi": float(rsi)
+        }
+
+        return True, result
+
+    except Exception as e:
+
         print(
-            "Testing:",
-            stock["name"]
+            "Technical error:",
+            e
+        )
+
+        return False, None
+
+
+# =========================================================
+# 8. TELEGRAM
+# =========================================================
+
+def send_telegram(message):
+
+    print("\n========================================")
+    print("TELEGRAM")
+    print("========================================")
+
+    if not TELEGRAM_BOT_TOKEN:
+
+        print(
+            "TELEGRAM_BOT_TOKEN missing"
+        )
+
+        return
+
+    if not TELEGRAM_CHAT_ID:
+
+        print(
+            "TELEGRAM_CHAT_ID missing"
+        )
+
+        return
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message
+    }
+
+    try:
+
+        r = requests.post(
+            url,
+            data=payload,
+            timeout=20
         )
 
         print(
-            "Screener symbol:",
-            symbol
+            "Telegram status:",
+            r.status_code
         )
 
         print(
-            "Yahoo symbol:",
-            yahoo_symbol
+            "Telegram response:",
+            r.text[:300]
+        )
+
+    except Exception as e:
+
+        print(
+            "Telegram ERROR:",
+            e
+        )
+
+
+# =========================================================
+# 9. MAIN SCANNER
+# =========================================================
+
+def main():
+
+    print("\n========================================")
+    print("NSE SWING SCANNER STARTED")
+    print("========================================")
+
+    internet_test()
+
+    if not screener_test():
+
+        print(
+            "\nSTOP: Screener connection failed."
+        )
+
+        return
+
+    stocks = get_screener_stocks()
+
+    if not stocks:
+
+        print(
+            "\nSTOP: No fundamental stocks found."
+        )
+
+        return
+
+    print(
+        f"\nStocks to analyse: {len(stocks)}"
+    )
+
+    # Price data test
+
+    success = price_data_test(
+        stocks
+    )
+
+    if success == 0:
+
+        print("\n========================================")
+        print("STOP")
+        print("========================================")
+        print(
+            "NO PRICE DATA RECEIVED."
+        )
+        print(
+            "Technical scan NOT started."
+        )
+
+        send_telegram(
+            "NSE Swing Scanner\n\n"
+            "⚠️ Price data unavailable.\n"
+            "Technical scan could not start."
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # Technical scan
+    # -----------------------------------------------------
+
+    print("\n========================================")
+    print("STARTING TECHNICAL 6/6 SCAN")
+    print("========================================")
+
+    final_results = []
+
+    checked = 0
+
+    for stock in stocks:
+
+        symbol = stock["symbol"]
+
+        checked += 1
+
+        print(
+            f"[{checked}/{len(stocks)}] "
+            f"{symbol}"
         )
 
         df = get_price_data(
             symbol
         )
 
-        if df is not None:
+        if df is None:
 
-            success += 1
+            continue
+
+        passed, result = technical_check(
+            df
+        )
+
+        if passed:
+
+            final_results.append({
+                "symbol": symbol,
+                "name": stock["name"],
+                **result
+            })
 
             print(
-                "PRICE DATA: OK"
+                ">>> 6/6 PASS"
             )
 
-            print(
-                "Rows:",
-                len(df)
-            )
-
-            print(
-                "Latest close:",
-                round(
-                    float(
-                        df["close"].iloc[-1]
-                    ),
-                    2
-                )
-            )
-
-        else:
-
-            print(
-                "PRICE DATA: FAILED"
-            )
-
-    print()
-    print(
-        "Price test:",
-        success,
-        "/",
-        len(test_stocks),
-        "working"
-    )
-
-    return success
-
-
-# =========================================================
-# TECHNICAL ANALYSIS
-# =========================================================
-
-def technical_analysis(
-    symbol,
-    df
-):
-
-    close = df["close"]
+        time.sleep(0.2)
 
     # -----------------------------------------------------
-    # EMA 20
+    # FINAL RESULT
     # -----------------------------------------------------
-
-    ema20 = (
-        close
-        .ewm(
-            span=20,
-            adjust=False
-        )
-        .mean()
-    )
-
-    # -----------------------------------------------------
-    # EMA 50
-    # -----------------------------------------------------
-
-    ema50 = (
-        close
-        .ewm(
-            span=50,
-            adjust=False
-        )
-        .mean()
-    )
-
-    # -----------------------------------------------------
-    # RSI 14
-    # -----------------------------------------------------
-
-    delta = close.diff()
-
-    gain = (
-        delta
-        .clip(lower=0)
-        .ewm(
-            alpha=1 / 14,
-            adjust=False
-        )
-        .mean()
-    )
-
-    loss = (
-        -delta
-        .clip(upper=0)
-        .ewm(
-            alpha=1 / 14,
-            adjust=False
-        )
-        .mean()
-    )
-
-    loss = loss.replace(
-        0,
-        pd.NA
-    )
-
-    rs = gain / loss
-
-    rsi = (
-        100
-        - (
-            100
-            / (1 + rs)
-        )
-    )
-
-    # -----------------------------------------------------
-    # VOLUME
-    # -----------------------------------------------------
-
-    average_volume20 = (
-        df["volume"]
-        .rolling(20)
-        .mean()
-    )
-
-    # -----------------------------------------------------
-    # PREVIOUS 20 DAY HIGH
-    # -----------------------------------------------------
-
-    previous_20_high = (
-        df["high"]
-        .shift(1)
-        .rolling(20)
-        .max()
-    )
-
-    # -----------------------------------------------------
-    # CURRENT VALUES
-    # -----------------------------------------------------
-
-    entry = float(
-        close.iloc[-1]
-    )
-
-    current_ema20 = float(
-        ema20.iloc[-1]
-    )
-
-    current_ema50 = float(
-        ema50.iloc[-1]
-    )
-
-    current_rsi = float(
-        rsi.iloc[-1]
-    )
-
-    current_volume = float(
-        df["volume"].iloc[-1]
-    )
-
-    average_volume = float(
-        average_volume20.iloc[-1]
-    )
-
-    resistance = float(
-        previous_20_high.iloc[-1]
-    )
-
-    # -----------------------------------------------------
-    # SIX FILTERS
-    # -----------------------------------------------------
-
-    # 1. TREND
-    filter_1 = (
-        entry
-        > current_ema20
-        > current_ema50
-    )
-
-    # 2. EMA
-    filter_2 = (
-        entry
-        > current_ema20
-    )
-
-    # 3. RSI
-    filter_3 = (
-        55
-        <= current_rsi
-        <= 70
-    )
-
-    # 4. VOLUME
-    filter_4 = (
-        current_volume
-        > average_volume * 1.5
-    )
-
-    # 5. RESISTANCE
-    filter_5 = (
-        entry
-        >= resistance * 0.98
-    )
-
-    # 6. BREAKOUT
-    filter_6 = (
-        entry
-        > resistance
-    )
-
-    all_pass = (
-        filter_1
-        and filter_2
-        and filter_3
-        and filter_4
-        and filter_5
-        and filter_6
-    )
-
-    return {
-
-        "symbol": symbol,
-
-        "entry": entry,
-
-        "ema20": current_ema20,
-
-        "ema50": current_ema50,
-
-        "rsi": current_rsi,
-
-        "volume": current_volume,
-
-        "average_volume": average_volume,
-
-        "volume_ratio": (
-            current_volume
-            / average_volume
-            if average_volume > 0
-            else 0
-        ),
-
-        "resistance": resistance,
-
-        "f1": filter_1,
-        "f2": filter_2,
-        "f3": filter_3,
-        "f4": filter_4,
-        "f5": filter_5,
-        "f6": filter_6,
-
-        "all_pass": all_pass
-    }
-
-
-# =========================================================
-# DIAGNOSTIC REPORT
-# =========================================================
-
-def diagnostic_report(
-    results
-):
 
     print("\n========================================")
-    print("6-FILTER DIAGNOSTIC REPORT")
+    print("FINAL TECHNICAL 6/6")
     print("========================================")
 
-    total = len(results)
-
     print(
-        "Valid price-data stocks:",
-        total
+        "FINAL BUY COUNT:",
+        len(final_results)
     )
 
-    if total == 0:
-
-        print(
-            "No valid price data received."
-        )
-
-        return
-
-    # Individual filters
-
-    f1 = sum(
-        x["f1"]
-        for x in results
-    )
-
-    f2 = sum(
-        x["f2"]
-        for x in results
-    )
-
-    f3 = sum(
-        x["f3"]
-        for x in results
-    )
-
-    f4 = sum(
-        x["f4"]
-        for x in results
-    )
-
-    f5 = sum(
-        x["f5"]
-        for x in results
-    )
-
-    f6 = sum(
-        x["f6"]
-        for x in results
-    )
-
-    print()
-    print(
-        "INDIVIDUAL FILTER PASS:"
-    )
-
-    print(
-        "Filter 1 Trend      :",
-        f1
-    )
-
-    print(
-        "Filter 2 EMA        :",
-        f2
-    )
-
-    print(
-        "Filter 3 RSI        :",
-        f3
-    )
-
-    print(
-        "Filter 4 Volume     :",
-        f4
-    )
-
-    print(
-        "Filter 5 Resistance :",
-        f5
-    )
-
-    print(
-        "Filter 6 Breakout   :",
-        f6
-    )
-
-    # Cumulative
-
-    c1 = sum(
-        x["f1"]
-        for x in results
-    )
-
-    c2 = sum(
-        x["f1"]
-        and x["f2"]
-        for x in results
-    )
-
-    c3 = sum(
-        x["f1"]
-        and x["f2"]
-        and x["f3"]
-        for x in results
-    )
-
-    c4 = sum(
-        x["f1"]
-        and x["f2"]
-        and x["f3"]
-        and x["f4"]
-        for x in results
-    )
-
-    c5 = sum(
-        x["f1"]
-        and x["f2"]
-        and x["f3"]
-        and x["f4"]
-        and x["f5"]
-        for x in results
-    )
-
-    c6 = sum(
-        x["f1"]
-        and x["f2"]
-        and x["f3"]
-        and x["f4"]
-        and x["f5"]
-        and x["f6"]
-        for x in results
-    )
-
-    print()
-    print(
-        "CUMULATIVE PASS:"
-    )
-
-    print(
-        "Filter 1 only            :",
-        c1
-    )
-
-    print(
-        "Filter 1 + 2             :",
-        c2
-    )
-
-    print(
-        "Filter 1 + 2 + 3         :",
-        c3
-    )
-
-    print(
-        "Filter 1 + 2 + 3 + 4     :",
-        c4
-    )
-
-    print(
-        "Filter 1 + 2 + 3 + 4 + 5 :",
-        c5
-    )
-
-    print(
-        "ALL 6 FILTERS            :",
-        c6
-    )
-
-    print(
-        "========================================"
-    )
-
-
-# =========================================================
-# TELEGRAM FINAL RESULT
-# =========================================================
-
-def send_final_results(
-    results
-):
-
-    print("\n========================================")
-    print("FINAL TECHNICAL RESULTS")
-    print("========================================")
-
-    if not results:
+    if final_results:
 
         message = (
-            "🔔 NSE SWING SCANNER\n\n"
-            "Fundamental screen: PASS\n"
-            "Technical 6/6: 0\n\n"
-            "Aaj koi stock 6/6 "
-            "technical filters pass nahi hua."
+            "🚀 NSE SWING SCANNER\n\n"
+            "6/6 TECHNICAL PASS\n\n"
         )
 
-        send_telegram(
-            message
-        )
+        for stock in final_results:
 
-        return
-
-    message = (
-        "🚨 NSE SWING SCANNER\n\n"
-        "✅ FUNDAMENTAL + TECHNICAL 6/6\n\n"
-    )
-
-    for i, x in enumerate(
-        results,
-        start=1
-    ):
-
-        entry = x["entry"]
-
-        stoploss = (
-            entry * 0.95
-        )
-
-        target = (
-            entry * 1.10
-        )
-
-        message += (
-            f"{i}. {x['symbol']}\n"
-            f"Entry: ₹{entry:.2f}\n"
-            f"Stoploss: ₹{stoploss:.2f}\n"
-            f"Target: ₹{target:.2f}\n"
-            f"RSI: {x['rsi']:.2f}\n"
-            f"Volume: "
-            f"{x['volume_ratio']:.2f}x\n"
-            f"Filter: 6/6\n\n"
-        )
-
-    message += (
-        f"Total Final Stocks: "
-        f"{len(results)}"
-    )
-
-    send_telegram(
-        message
-    )
-
-
-# =========================================================
-# MAIN
-# =========================================================
-
-def main():
-
-    print()
-    print("========================================")
-    print("NSE SWING SCANNER")
-    print("========================================")
-
-    # -----------------------------------------------------
-    # STAGE 1
-    # -----------------------------------------------------
-
-    fundamental_stocks = (
-        get_screener_stocks()
-    )
-
-    if not fundamental_stocks:
-
-        print(
-            "No fundamental stocks found."
-        )
-
-        send_telegram(
-            "⚠️ NSE Scanner\n\n"
-            "Fundamental screen returned 0 stocks."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # PRICE CONNECTION TEST
-    # -----------------------------------------------------
-
-    working_price_test = (
-        test_price_connection(
-            fundamental_stocks
-        )
-    )
-
-    if working_price_test == 0:
-
-        print()
-        print(
-            "❌ PRICE DATA CONNECTION FAILED"
-        )
-
-        print(
-            "Technical scan stopped."
-        )
-
-        send_telegram(
-            "⚠️ NSE SWING SCANNER\n\n"
-            "Fundamental stocks found, "
-            "but price-data connection failed.\n\n"
-            "Technical scan stopped."
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # STAGE 2
-    # -----------------------------------------------------
-
-    print()
-    print("========================================")
-    print("STAGE 2: TECHNICAL 6/6")
-    print("========================================")
-
-    print(
-        "Stocks to analyse:",
-        len(fundamental_stocks)
-    )
-
-    results = []
-
-    completed = 0
-
-    futures = {}
-
-    with ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as executor:
-
-        for stock in fundamental_stocks:
-
-            symbol = stock["symbol"]
-
-            future = executor.submit(
-                get_price_data,
-                symbol
+            message += (
+                f"📌 {stock['symbol']}\n"
+                f"Entry: ₹{stock['entry']:.2f}\n"
+                f"Stoploss: ₹{stock['stoploss']:.2f}\n"
+                f"Target: ₹{stock['target']:.2f}\n"
+                f"RSI: {stock['rsi']:.2f}\n\n"
             )
 
-            futures[future] = stock
+    else:
 
-        total = len(futures)
+        message = (
+            "NSE SWING SCANNER\n\n"
+            "No stock passed all 6 technical filters today."
+        )
 
-        for future in as_completed(
-            futures
-        ):
+    send_telegram(message)
 
-            completed += 1
-
-            stock = futures[future]
-
-            try:
-
-                df = future.result()
-
-                if df is not None:
-
-                    result = (
-                        technical_analysis(
-                            stock["symbol"],
-                            df
-                        )
-                    )
-
-                    result["name"] = (
-                        stock["name"]
-                    )
-
-                    results.append(
-                        result
-                    )
-
-            except Exception as e:
-
-                print(
-                    "Analysis error:",
-                    stock["symbol"],
-                    e
-                )
-
-            if (
-                completed % 25 == 0
-                or completed == total
-            ):
-
-                six_pass = sum(
-                    x["all_pass"]
-                    for x in results
-                )
-
-                print(
-                    f"Technical progress: "
-                    f"{completed}/{total} "
-                    f"| 6/6 PASS: "
-                    f"{six_pass}"
-                )
-
-    # -----------------------------------------------------
-    # DIAGNOSTIC
-    # -----------------------------------------------------
-
-    diagnostic_report(
-        results
-    )
-
-    # -----------------------------------------------------
-    # FINAL 6/6
-    # -----------------------------------------------------
-
-    final_results = [
-        x
-        for x in results
-        if x["all_pass"]
-    ]
-
-    print()
+    print("\n========================================")
+    print("SCANNER FINISHED")
     print("========================================")
-  
+
+
+# =========================================================
+# START
+# =========================================================
+
+if __name__ == "__main__":
+
+    main()
