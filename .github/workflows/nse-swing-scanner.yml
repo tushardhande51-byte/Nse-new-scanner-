@@ -1,4 +1,5 @@
-name: NSE Swing Scanner
+
+workflow = """name: NSE Swing Scanner
 
 on:
   workflow_dispatch:
@@ -24,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install "requests>=2.31,<3" "beautifulsoup4>=4.12,<5" "pandas>=2.2,<3"
 
       - name: Run Scanner
         env:
@@ -32,3 +33,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python scanner.py
+"""
+
+path = Path("/mnt/data/nse-swing-scanner.yml")
+path.write_text(workflow, encoding="utf-8")
+print(f"Created: {path}")
+print("Workflow updated: requirements.txt is no longer required.")
