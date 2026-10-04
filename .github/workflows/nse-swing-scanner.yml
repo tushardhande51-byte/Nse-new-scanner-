@@ -1,12 +1,9 @@
-
-workflow = """name: NSE Swing Scanner
+name: NSE Swing Scanner
 
 on:
   workflow_dispatch:
 
   schedule:
-    # 10:15 UTC = 15:45 IST
-    # Monday to Friday
     - cron: "15 10 * * 1-5"
 
 jobs:
@@ -25,7 +22,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "requests>=2.31,<3" "beautifulsoup4>=4.12,<5" "pandas>=2.2,<3"
+          python -m pip install requests beautifulsoup4 pandas
+
+      - name: Check files
+        run: |
+          echo "Files in repository:"
+          ls -la
+          echo "Workflow directory:"
+          ls -la .github/workflows
 
       - name: Run Scanner
         env:
@@ -33,9 +37,3 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python scanner.py
-"""
-
-path = Path("/mnt/data/nse-swing-scanner.yml")
-path.write_text(workflow, encoding="utf-8")
-print(f"Created: {path}")
-print("Workflow updated: requirements.txt is no longer required.")
