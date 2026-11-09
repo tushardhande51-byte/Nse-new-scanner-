@@ -299,6 +299,20 @@ def evaluate(symbol, company):
         "rr_assessment": ("LOW R:R - caution" if risk_reward_t1 < 1.0 else
                           "MODERATE R:R - check risk" if risk_reward_t1 < 1.5 else
                           "R:R 1.5 or higher"),
+        "trade_quality": (
+            "GREEN - GOOD SETUP" if
+            stoploss_risk_pct <= 5.0 and risk_reward_t1 >= 1.5
+            and target_sources[0] == "Actual pivot resistance"
+            else "RED - HIGH RISK / WEAK R:R" if
+            stoploss_risk_pct > 8.0 or risk_reward_t1 < 1.0
+            else "YELLOW - MODERATE / CHECK SETUP"
+        ),
+        "trade_quality_emoji": (
+            "🟢" if stoploss_risk_pct <= 5.0 and risk_reward_t1 >= 1.5
+            and target_sources[0] == "Actual pivot resistance"
+            else "🔴" if stoploss_risk_pct > 8.0 or risk_reward_t1 < 1.0
+            else "🟡"
+        ),
         "booking_plan": "50%-30%-20%",
         "stoploss_after_t1": "Keep below support",
         "filters_passed": "6/6",
@@ -369,6 +383,7 @@ def main():
         for item in matches[:20]:
             lines.extend([
                 f"{item['symbol']} - {item['company']}",
+                f"{item['trade_quality_emoji']} TRADE QUALITY: {item['trade_quality']}",
                 f"Entry: Rs {item['entry']:.2f}",
                 f"Support: Rs {item['support']:.2f} ({item['support_source']}) | Stop-loss: Rs {item['stoploss']:.2f}",
                 f"Risk to SL: {item['stoploss_risk_pct_from_entry']:.2f}% of entry | Support-to-SL buffer: {item['support_to_stoploss_buffer_pct']:.2f}%",
