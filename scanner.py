@@ -24,6 +24,11 @@ ADX_MIN = 20
 LEVEL_LOOKBACK = 120
 PIVOT_WIDTH = 3
 LEVEL_BUFFER_PCT = 0.005
+# Advisory trade-quality warnings; these never reject a strict 6/6 match.
+NEAR_RESISTANCE_PCT = 2.0
+CLOSE_RESISTANCE_PCT = 4.0
+HIGH_VOLUME_RATIO = 3.0
+UNUSUAL_VOLUME_RATIO = 5.0
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
@@ -195,9 +200,27 @@ def support_resistance_levels(frame, entry):
     reward_to_t1 = targets[0] - entry
     risk_reward_t1 = reward_to_t1 / risk if risk > 0 else 0
     resistances = (resistance_zones + [None, None, None])[:3]
+    # Measure the nearest actual overhead pivot, not a projected target.
+    nearest_resistance = resistance_zones[0] if resistance_zones else None
+    resistance_gap_pct = (
+        (nearest_resistance - entry) / entry * 100
+        if nearest_resistance is not None and entry > 0 else None
+    )
+    if resistance_gap_pct is None:
+        resistance_warning = "NO OVERHEAD PIVOT - projection only"
+    elif resistance_gap_pct < NEAR_RESISTANCE_PCT:
+        resistance_warning = "NEAR RESISTANCE - entry has limited room"
+    elif resistance_gap_pct < CLOSE_RESISTANCE_PCT:
+        resistance_warning = "RESISTANCE CLOSE - check breakout strength"
+    else:
+        resistance_warning = "ROOM TO RESISTANCE"
+    stoploss_risk_pct = (entry - stoploss) / entry * 100 if entry > 0 else 0
+    support_sl_buffer_pct = (support - stoploss) / support * 100 if support > 0 else 0
     # After T1, keep the remaining-position stop below the original support.
     return (support, resistances, stoploss, targets, risk_reward_t1,
-            support_source, target_sources, target_resistance_prices)
+            support_source, target_sources, target_resistance_prices,
+            nearest_resistance, resistance_gap_pct, resistance_warning,
+            stoploss_risk_pct, support_sl_buffer_pct)
 
 def evaluate(symbol, company):
     frame = fetch_history(symbol)
@@ -229,7 +252,16 @@ def evaluate(symbol, company):
     entry = float(row.close)
     levels = support_resistance_levels(frame, entry)
     (support, resistances, stoploss, targets, risk_reward_t1, support_source,
-     target_sources, target_resistance_prices) = levels
+     target_sources, target_resistance_prices, nearest_resistance,
+     resistance_gap_pct, resistance_warning, stoploss_risk_pct,
+     support_sl_buffer_pct) = levels
+    volume_ratio = float(row.volume / row.avg_volume20)
+    if volume_ratio >= UNUSUAL_VOLUME_RATIO:
+        volume_warning = "UNUSUAL VOLUME - verify news / bulk or block deal"
+    elif volume_ratio >= HIGH_VOLUME_RATIO:
+        volume_warning = "HIGH VOLUME - verify reason"
+    else:
+        volume_warning = "Normal relative volume"
 
     return {
         "symbol": symbol,
@@ -240,10 +272,16 @@ def evaluate(symbol, company):
         "ema50": float(row.ema50),
         "rsi": float(row.rsi14),
         "adx": float(row.adx14),
-        "volume_ratio": float(row.volume / row.avg_volume20),
+        "volume_ratio": volume_ratio,
+        "volume_warning": volume_warning,
         "entry": entry,
         "support": support,
         "support_source": support_source,
+        "nearest_actual_resistance": nearest_resistance,
+        "resistance_gap_pct": resistance_gap_pct,
+        "resistance_warning": resistance_warning,
+        "stoploss_risk_pct_from_entry": stoploss_risk_pct,
+        "support_to_stoploss_buffer_pct": support_sl_buffer_pct,
         "resistance_1": resistances[0],
         "resistance_2": resistances[1],
         "resistance_3": resistances[2],
@@ -333,6 +371,9 @@ def main():
                 f"{item['symbol']} - {item['company']}",
                 f"Entry: Rs {item['entry']:.2f}",
                 f"Support: Rs {item['support']:.2f} ({item['support_source']}) | Stop-loss: Rs {item['stoploss']:.2f}",
+                f"Risk to SL: {item['stoploss_risk_pct_from_entry']:.2f}% of entry | Support-to-SL buffer: {item['support_to_stoploss_buffer_pct']:.2f}%",
+                f"Nearest actual resistance: Rs {item['nearest_actual_resistance']:.2f} ({item['resistance_gap_pct']:.2f}% above entry)" if item['nearest_actual_resistance'] is not None else "Nearest actual resistance: Not found",
+                f"Resistance check: {item['resistance_warning']}",
                 f"T1: Rs {item['target_1']:.2f} | {item['target_1_source']}" +
                     (f" at Rs {item['target_1_resistance_price']:.2f}" if item["target_1_resistance_price"] is not None else "") + " | book 50%",
                 f"T2: Rs {item['target_2']:.2f} | {item['target_2_source']}" +
@@ -341,7 +382,7 @@ def main():
                     (f" at Rs {item['target_3_resistance_price']:.2f}" if item["target_3_resistance_price"] is not None else "") + " | book final 20%",
                 f"T1 Risk:Reward: 1:{item['risk_reward_to_t1']:.2f} | {item['rr_assessment']}",
                 "After T1: keep remaining-position SL below support; no automatic breakeven move.",
-                f"RSI: {item['rsi']:.1f} | ADX: {item['adx']:.1f} | Volume: {item['volume_ratio']:.1f}x",
+                f"RSI: {item['rsi']:.1f} | ADX: {item['adx']:.1f} | Volume: {item['volume_ratio']:.1f}x | {item['volume_warning']}",
                 "",
             ])
         if len(matches) > 20:
