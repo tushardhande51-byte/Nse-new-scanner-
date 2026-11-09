@@ -134,31 +134,47 @@ def adx(frame, period=14):
 
 def support_resistance_levels(frame, entry):
     # Confirmed 7-candle pivots: three completed candles on either side.
-    # Use the most recent 120 sessions to find the nearest levels around price.
+    # Build three distinct overhead resistance targets from the last 120 sessions.
     recent = frame.tail(LEVEL_LOOKBACK).copy()
     pivot_high = recent["high"].eq(recent["high"].rolling(2 * PIVOT_WIDTH + 1, center=True).max())
     pivot_low = recent["low"].eq(recent["low"].rolling(2 * PIVOT_WIDTH + 1, center=True).min())
 
     supports = recent.loc[pivot_low & (recent["low"] < entry), "low"]
-    resistances = recent.loc[pivot_high & (recent["high"] > entry), "high"]
-    if supports.empty or resistances.empty:
+    resistance_values = sorted(
+        float(value)
+        for value in recent.loc[pivot_high & (recent["high"] > entry), "high"].dropna()
+    )
+    if supports.empty or not resistance_values:
         return None
 
     support = float(supports.max())
-    resistance = float(resistances.min())
-    # Put SL just below support and target just before resistance.
     stoploss = support * (1 - LEVEL_BUFFER_PCT)
-    target = resistance * (1 - LEVEL_BUFFER_PCT)
-    if not (stoploss < entry < target):
+    if not stoploss < entry:
+        return None
+
+    # Merge nearby pivot highs into one zone so one price cluster does not
+    # become multiple artificial targets. Keep the lower edge as first touch.
+    resistance_zones = []
+    for level in resistance_values:
+        if not resistance_zones or (level - resistance_zones[-1]) / resistance_zones[-1] > 0.01:
+            resistance_zones.append(level)
+
+    if len(resistance_zones) < 3:
+        return None
+
+    targets = [level * (1 - LEVEL_BUFFER_PCT) for level in resistance_zones[:3]]
+    if not (entry < targets[0] < targets[1] < targets[2]):
         return None
 
     risk = entry - stoploss
-    reward = target - entry
-    risk_reward = reward / risk if risk > 0 else 0
-    if risk_reward < MIN_RISK_REWARD:
+    reward_to_t1 = targets[0] - entry
+    risk_reward_t1 = reward_to_t1 / risk if risk > 0 else 0
+    if risk_reward_t1 < MIN_RISK_REWARD:
         return None
-    return support, resistance, stoploss, target, risk_reward
 
+    # Stop-loss remains just below the original support after T1; it is not
+    # automatically moved to breakeven. User requested support-based trailing.
+    return support, resistance_zones[:3], stoploss, targets, risk_reward_t1
 
 def evaluate(symbol, company):
     frame = fetch_history(symbol)
@@ -192,7 +208,7 @@ def evaluate(symbol, company):
     # No valid overhead resistance/support or inadequate R:R = no actionable signal.
     if levels is None:
         return None
-    support, resistance, stoploss, target, risk_reward = levels
+    support, resistances, stoploss, targets, risk_reward_t1 = levels
 
     return {
         "symbol": symbol,
@@ -206,10 +222,16 @@ def evaluate(symbol, company):
         "volume_ratio": float(row.volume / row.avg_volume20),
         "entry": entry,
         "support": support,
-        "resistance": resistance,
+        "resistance_1": resistances[0],
+        "resistance_2": resistances[1],
+        "resistance_3": resistances[2],
         "stoploss": stoploss,
-        "target": target,
-        "risk_reward": risk_reward,
+        "target_1": targets[0],
+        "target_2": targets[1],
+        "target_3": targets[2],
+        "risk_reward_to_t1": risk_reward_t1,
+        "booking_plan": "50%-30%-20%",
+        "stoploss_after_t1": "Keep below support",
         "filters_passed": "6/6",
     }
 
@@ -237,7 +259,7 @@ def main():
     started = now_ist()
     print(f"NSE EOD TECHNICAL SCANNER | {started:%Y-%m-%d %H:%M:%S %Z}")
     print("No broker connection or order placement.")
-    print("Targets/stops are based on confirmed 7-candle pivot support/resistance.")
+    print("Three targets use distinct confirmed pivot resistances; booking plan 50%-30%-20%; stop remains below support after T1.")
     universe = get_nse_universe()
     print(f"NSE EQ symbols downloaded: {len(universe)}")
 
@@ -250,7 +272,7 @@ def main():
                 result = future.result()
                 if result:
                     matches.append(result)
-                    print(f"6/6 + valid S/R + R:R MATCH: {symbol}")
+                    print(f"6/6 + 3 resistance targets + R:R MATCH: {symbol}")
             except Exception as exc:
                 errors += 1
                 print(f"ERROR {symbol}: {exc}")
@@ -266,11 +288,11 @@ def main():
         "NSE SWING SCANNER - EOD",
         f"Date: {report_date}",
         f"Universe: {len(universe)} NSE EQ symbols",
-        "Signal rule: strict 6/6 + support/resistance + minimum R:R 1.5 | No orders placed",
+        "Signal rule: strict 6/6 + 3 pivot resistance targets + T1 R:R >= 1.5 | No orders placed",\n        "Booking plan: T1 50%, T2 30%, T3 remaining 20%; after T1 keep SL below support.",
         "",
     ]
     if not matches:
-        lines.append("No stock passed all filters with valid support/resistance and minimum 1.5 risk-reward.")
+        lines.append("No stock passed all filters with three valid resistance targets and minimum 1.5 T1 risk-reward.")
     else:
         lines.append(f"Actionable matches: {len(matches)}")
         for item in matches[:20]:
@@ -278,8 +300,11 @@ def main():
                 f"{item['symbol']} - {item['company']}",
                 f"Entry: Rs {item['entry']:.2f}",
                 f"Support: Rs {item['support']:.2f} | Stop-loss: Rs {item['stoploss']:.2f}",
-                f"Resistance: Rs {item['resistance']:.2f} | Target: Rs {item['target']:.2f}",
-                f"Risk:Reward: 1:{item['risk_reward']:.2f}",
+                f"T1: Rs {item['target_1']:.2f} (book 50%) | Resistance: Rs {item['resistance_1']:.2f}",
+                f"T2: Rs {item['target_2']:.2f} (book 30%) | Resistance: Rs {item['resistance_2']:.2f}",
+                f"T3: Rs {item['target_3']:.2f} (book final 20%) | Resistance: Rs {item['resistance_3']:.2f}",
+                f"T1 Risk:Reward: 1:{item['risk_reward_to_t1']:.2f}",
+                "After T1: keep remaining-position SL below support; no automatic breakeven move.",
                 f"RSI: {item['rsi']:.1f} | ADX: {item['adx']:.1f} | Volume: {item['volume_ratio']:.1f}x",
                 "",
             ])
