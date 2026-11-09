@@ -1,4 +1,3 @@
-import csv
 import io
 import os
 import time
@@ -9,8 +8,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
-# Broker-free EOD scanner. Price history is obtained from Yahoo Finance;
-# the tradable universe is the NSE official equity list (EQ series).
+# Broker-free EOD scanner. NSE EQ universe; daily candles from Yahoo Finance.
 NSE_CSV_URLS = [
     "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
     "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
@@ -23,6 +21,10 @@ MIN_ROWS = 210
 VOLUME_MULTIPLIER = 1.5
 RSI_MIN, RSI_MAX = 55, 70
 ADX_MIN = 20
+LEVEL_LOOKBACK = 120
+PIVOT_WIDTH = 3
+MIN_RISK_REWARD = 1.5
+LEVEL_BUFFER_PCT = 0.005
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
@@ -130,6 +132,34 @@ def adx(frame, period=14):
     return dx.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
 
+def support_resistance_levels(frame, entry):
+    # Confirmed 7-candle pivots: three completed candles on either side.
+    # Use the most recent 120 sessions to find the nearest levels around price.
+    recent = frame.tail(LEVEL_LOOKBACK).copy()
+    pivot_high = recent["high"].eq(recent["high"].rolling(2 * PIVOT_WIDTH + 1, center=True).max())
+    pivot_low = recent["low"].eq(recent["low"].rolling(2 * PIVOT_WIDTH + 1, center=True).min())
+
+    supports = recent.loc[pivot_low & (recent["low"] < entry), "low"]
+    resistances = recent.loc[pivot_high & (recent["high"] > entry), "high"]
+    if supports.empty or resistances.empty:
+        return None
+
+    support = float(supports.max())
+    resistance = float(resistances.min())
+    # Put SL just below support and target just before resistance.
+    stoploss = support * (1 - LEVEL_BUFFER_PCT)
+    target = resistance * (1 - LEVEL_BUFFER_PCT)
+    if not (stoploss < entry < target):
+        return None
+
+    risk = entry - stoploss
+    reward = target - entry
+    risk_reward = reward / risk if risk > 0 else 0
+    if risk_reward < MIN_RISK_REWARD:
+        return None
+    return support, resistance, stoploss, target, risk_reward
+
+
 def evaluate(symbol, company):
     frame = fetch_history(symbol)
     if frame is None or len(frame) < MIN_ROWS:
@@ -146,8 +176,6 @@ def evaluate(symbol, company):
     if row[needed].isna().any():
         return None
 
-    # Six independent conditions: trend/structure, momentum, participation,
-    # breakout, and trend strength. No duplicated "near resistance" condition.
     checks = {
         "Close > EMA20": row.close > row.ema20,
         "EMA20 > EMA50": row.ema20 > row.ema50,
@@ -156,11 +184,16 @@ def evaluate(symbol, company):
         "20D breakout": row.close > row.prior_high20,
         "ADX > 20": row.adx14 > ADX_MIN,
     }
-    passed = sum(bool(value) for value in checks.values())
-    if passed != 6:
+    if sum(bool(value) for value in checks.values()) != 6:
         return None
 
     entry = float(row.close)
+    levels = support_resistance_levels(frame, entry)
+    # No valid overhead resistance/support or inadequate R:R = no actionable signal.
+    if levels is None:
+        return None
+    support, resistance, stoploss, target, risk_reward = levels
+
     return {
         "symbol": symbol,
         "company": company,
@@ -172,8 +205,11 @@ def evaluate(symbol, company):
         "adx": float(row.adx14),
         "volume_ratio": float(row.volume / row.avg_volume20),
         "entry": entry,
-        "stoploss": entry * 0.95,
-        "target": entry * 1.10,
+        "support": support,
+        "resistance": resistance,
+        "stoploss": stoploss,
+        "target": target,
+        "risk_reward": risk_reward,
         "filters_passed": "6/6",
     }
 
@@ -201,6 +237,7 @@ def main():
     started = now_ist()
     print(f"NSE EOD TECHNICAL SCANNER | {started:%Y-%m-%d %H:%M:%S %Z}")
     print("No broker connection or order placement.")
+    print("Targets/stops are based on confirmed 7-candle pivot support/resistance.")
     universe = get_nse_universe()
     print(f"NSE EQ symbols downloaded: {len(universe)}")
 
@@ -213,7 +250,7 @@ def main():
                 result = future.result()
                 if result:
                     matches.append(result)
-                    print(f"6/6 MATCH: {symbol}")
+                    print(f"6/6 + valid S/R + R:R MATCH: {symbol}")
             except Exception as exc:
                 errors += 1
                 print(f"ERROR {symbol}: {exc}")
@@ -229,25 +266,26 @@ def main():
         "NSE SWING SCANNER - EOD",
         f"Date: {report_date}",
         f"Universe: {len(universe)} NSE EQ symbols",
-        "Signal rule: strict 6/6 | No orders placed",
+        "Signal rule: strict 6/6 + support/resistance + minimum R:R 1.5 | No orders placed",
         "",
     ]
     if not matches:
-        lines.append("No stock passed all 6 filters today.")
+        lines.append("No stock passed all filters with valid support/resistance and minimum 1.5 risk-reward.")
     else:
-        lines.append(f"6/6 matches: {len(matches)}")
-        for item in matches[:25]:
+        lines.append(f"Actionable matches: {len(matches)}")
+        for item in matches[:20]:
             lines.extend([
                 f"{item['symbol']} - {item['company']}",
-                f"Close/Entry: Rs {item['entry']:.2f}",
-                f"Stop-loss (illustrative 5%): Rs {item['stoploss']:.2f}",
-                f"Target (illustrative 10%): Rs {item['target']:.2f}",
+                f"Entry: Rs {item['entry']:.2f}",
+                f"Support: Rs {item['support']:.2f} | Stop-loss: Rs {item['stoploss']:.2f}",
+                f"Resistance: Rs {item['resistance']:.2f} | Target: Rs {item['target']:.2f}",
+                f"Risk:Reward: 1:{item['risk_reward']:.2f}",
                 f"RSI: {item['rsi']:.1f} | ADX: {item['adx']:.1f} | Volume: {item['volume_ratio']:.1f}x",
                 "",
             ])
-        if len(matches) > 25:
+        if len(matches) > 20:
             lines.append(f"Full list: nse_swing_signals.csv ({len(matches)} stocks)")
-    lines.extend(["", "Data: NSE EQ universe + Yahoo Finance daily candles. Verify prices before trading."])
+    lines.extend(["", "Data: NSE EQ universe + Yahoo Finance daily candles. Verify prices/levels before trading."])
     message = "\n".join(lines)
     print(message)
     delivered = send_telegram(message)
