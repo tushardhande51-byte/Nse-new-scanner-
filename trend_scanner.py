@@ -255,8 +255,25 @@ def main():
             if count % 100 == 0:
                 print(f"Progress: {count}/{len(universe)} | scanned={len(results)} | errors={errors}")
     results.sort(key=lambda x: x["symbol"])
-    output = pd.DataFrame(results)
+    # One consolidated row per stock: show all four timeframe directions together.
+    for row in results:
+        states = [row.get(tf, "DATA NOT AVAILABLE") for tf in ["MONTHLY", "WEEKLY", "DAILY", "1 HOUR"]]
+        if all(state == "UPTREND" for state in states):
+            row["ALIGNMENT"] = "4/4 UPTREND"
+        elif all(state == "DOWNTREND" for state in states):
+            row["ALIGNMENT"] = "4/4 DOWNTREND"
+        elif any(state == "DATA NOT AVAILABLE" for state in states):
+            row["ALIGNMENT"] = "INCOMPLETE DATA"
+        else:
+            row["ALIGNMENT"] = "MIXED / SIDEWAYS"
+
+    output = pd.DataFrame(results, columns=["symbol", "company", "MONTHLY", "WEEKLY", "DAILY", "1 HOUR", "ALIGNMENT"])
     output.to_csv("nse_timeframe_trends.csv", index=False)
+
+    all_up = [x["symbol"] for x in results if x.get("ALIGNMENT") == "4/4 UPTREND"]
+    all_down = [x["symbol"] for x in results if x.get("ALIGNMENT") == "4/4 DOWNTREND"]
+    mixed = [x["symbol"] for x in results if x.get("ALIGNMENT") == "MIXED / SIDEWAYS"]
+    incomplete = [x["symbol"] for x in results if x.get("ALIGNMENT") == "INCOMPLETE DATA"]
 
     lines = [
         "NSE MULTI-TIMEFRAME TREND REPORT",
@@ -264,7 +281,15 @@ def main():
         f"Universe: {len(universe)} NSE EQ symbols | scanned rows: {len(results)} | errors: {errors}",
         "Trend definition: compare the last two fully closed candle CLOSE values only; higher = UPTREND, lower = DOWNTREND, equal = SIDEWAYS. No EMA.",
         "Only completed candles are used; unfinished current candles are excluded.",
-        "Full stock-wise report: download nse_timeframe_trends.csv from the GitHub Actions artifact.",
+        "Each stock is shown once with MONTHLY | WEEKLY | DAILY | 1 HOUR status in the CSV.",
+        "4/4 UPTREND means the stock is UP in all four timeframes; 4/4 DOWNTREND means DOWN in all four.",
+        "Full stock-wise matrix: download nse_timeframe_trends.csv from the GitHub Actions artifact.",
+        "",
+        f"ALL 4 TIMEFRAMES UPTREND: {len(all_up)}",
+        "Stocks (first 50): " + (", ".join(all_up[:50]) if all_up else "None"),
+        f"ALL 4 TIMEFRAMES DOWNTREND: {len(all_down)}",
+        "Stocks (first 50): " + (", ".join(all_down[:50]) if all_down else "None"),
+        f"MIXED / SIDEWAYS: {len(mixed)} | INCOMPLETE DATA: {len(incomplete)}",
         "",
     ]
     for timeframe in ["MONTHLY", "WEEKLY", "DAILY", "1 HOUR"]:
