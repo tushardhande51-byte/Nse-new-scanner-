@@ -133,48 +133,66 @@ def adx(frame, period=14):
 
 
 def support_resistance_levels(frame, entry):
-    # Confirmed 7-candle pivots: three completed candles on either side.
-    # Build three distinct overhead resistance targets from the last 120 sessions.
+    # Levels are advisory only: never reject a stock that has passed 6/6.
     recent = frame.tail(LEVEL_LOOKBACK).copy()
     pivot_high = recent["high"].eq(recent["high"].rolling(2 * PIVOT_WIDTH + 1, center=True).max())
     pivot_low = recent["low"].eq(recent["low"].rolling(2 * PIVOT_WIDTH + 1, center=True).min())
 
+    atr_series = pd.concat([
+        frame["high"] - frame["low"],
+        (frame["high"] - frame["close"].shift(1)).abs(),
+        (frame["low"] - frame["close"].shift(1)).abs(),
+    ], axis=1).max(axis=1).ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    atr_value = float(atr_series.iloc[-1])
+    if pd.isna(atr_value) or atr_value <= 0:
+        atr_value = entry * 0.02
+
     supports = recent.loc[pivot_low & (recent["low"] < entry), "low"]
+    if not supports.empty:
+        support = float(supports.max())
+        support_source = "Pivot support"
+    else:
+        support = entry - 1.5 * atr_value
+        support_source = "ATR fallback support"
+
+    stoploss = support * (1 - LEVEL_BUFFER_PCT)
+    if not stoploss < entry:
+        stoploss = entry - 1.5 * atr_value
+        support = stoploss
+        support_source = "ATR fallback support"
+
     resistance_values = sorted(
         float(value)
         for value in recent.loc[pivot_high & (recent["high"] > entry), "high"].dropna()
     )
-    if supports.empty or not resistance_values:
-        return None
-
-    support = float(supports.max())
-    stoploss = support * (1 - LEVEL_BUFFER_PCT)
-    if not stoploss < entry:
-        return None
-
-    # Merge nearby pivot highs into one zone so one price cluster does not
-    # become multiple artificial targets. Keep the lower edge as first touch.
     resistance_zones = []
     for level in resistance_values:
         if not resistance_zones or (level - resistance_zones[-1]) / resistance_zones[-1] > 0.01:
             resistance_zones.append(level)
 
-    if len(resistance_zones) < 3:
-        return None
-
-    targets = [level * (1 - LEVEL_BUFFER_PCT) for level in resistance_zones[:3]]
-    if not (entry < targets[0] < targets[1] < targets[2]):
-        return None
-
     risk = entry - stoploss
+    # Use real overhead pivot zones where available. If fewer than three exist,
+    # complete the plan with clearly-labelled risk-multiple projection targets.
+    targets, target_sources = [], []
+    for i in range(3):
+        if i < len(resistance_zones):
+            candidate = resistance_zones[i] * (1 - LEVEL_BUFFER_PCT)
+            if candidate > entry and (not targets or candidate > targets[-1]):
+                targets.append(candidate)
+                target_sources.append("Pivot resistance")
+                continue
+        multiples = [1.1, 2.0, 3.0]
+        candidate = entry + risk * multiples[i]
+        if targets and candidate <= targets[-1]:
+            candidate = targets[-1] + risk * 0.5
+        targets.append(candidate)
+        target_sources.append(f"{multiples[i]:.1f}R projection")
+
     reward_to_t1 = targets[0] - entry
     risk_reward_t1 = reward_to_t1 / risk if risk > 0 else 0
-    if risk_reward_t1 < MIN_RISK_REWARD:
-        return None
-
-    # Stop-loss remains just below the original support after T1; it is not
-    # automatically moved to breakeven. User requested support-based trailing.
-    return support, resistance_zones[:3], stoploss, targets, risk_reward_t1
+    resistances = (resistance_zones + [None, None, None])[:3]
+    # After T1, keep the remaining-position stop below the original support.
+    return support, resistances, stoploss, targets, risk_reward_t1, support_source, target_sources
 
 def evaluate(symbol, company):
     frame = fetch_history(symbol)
@@ -205,10 +223,7 @@ def evaluate(symbol, company):
 
     entry = float(row.close)
     levels = support_resistance_levels(frame, entry)
-    # No valid overhead resistance/support or inadequate R:R = no actionable signal.
-    if levels is None:
-        return None
-    support, resistances, stoploss, targets, risk_reward_t1 = levels
+    support, resistances, stoploss, targets, risk_reward_t1, support_source, target_sources = levels
 
     return {
         "symbol": symbol,
@@ -222,9 +237,13 @@ def evaluate(symbol, company):
         "volume_ratio": float(row.volume / row.avg_volume20),
         "entry": entry,
         "support": support,
+        "support_source": support_source,
         "resistance_1": resistances[0],
         "resistance_2": resistances[1],
         "resistance_3": resistances[2],
+        "target_1_source": target_sources[0],
+        "target_2_source": target_sources[1],
+        "target_3_source": target_sources[2],
         "stoploss": stoploss,
         "target_1": targets[0],
         "target_2": targets[1],
@@ -272,7 +291,7 @@ def main():
                 result = future.result()
                 if result:
                     matches.append(result)
-                    print(f"6/6 + 3 resistance targets + R:R MATCH: {symbol}")
+                    print(f"6/6 TECHNICAL MATCH: {symbol} | T1 R:R={result['risk_reward_to_t1']:.2f}")
             except Exception as exc:
                 errors += 1
                 print(f"ERROR {symbol}: {exc}")
@@ -288,22 +307,22 @@ def main():
         "NSE SWING SCANNER - EOD",
         f"Date: {report_date}",
         f"Universe: {len(universe)} NSE EQ symbols",
-        "Signal rule: strict 6/6 + 3 pivot resistance targets + T1 R:R >= 1.5 | No orders placed",
+        "Signal rule: strict 6/6 only; R:R is displayed, never used to reject a stock | No orders placed",
         "Booking plan: T1 50%, T2 30%, T3 remaining 20%; after T1 keep SL below support.",
         "",
     ]
     if not matches:
-        lines.append("No stock passed all filters with three valid resistance targets and minimum 1.5 T1 risk-reward.")
+        lines.append("No stock passed the strict 6/6 technical filters. Support/targets and R:R do not reject 6/6 matches.")
     else:
         lines.append(f"Actionable matches: {len(matches)}")
         for item in matches[:20]:
             lines.extend([
                 f"{item['symbol']} - {item['company']}",
                 f"Entry: Rs {item['entry']:.2f}",
-                f"Support: Rs {item['support']:.2f} | Stop-loss: Rs {item['stoploss']:.2f}",
-                f"T1: Rs {item['target_1']:.2f} (book 50%) | Resistance: Rs {item['resistance_1']:.2f}",
-                f"T2: Rs {item['target_2']:.2f} (book 30%) | Resistance: Rs {item['resistance_2']:.2f}",
-                f"T3: Rs {item['target_3']:.2f} (book final 20%) | Resistance: Rs {item['resistance_3']:.2f}",
+                f"Support: Rs {item['support']:.2f} ({item['support_source']}) | Stop-loss: Rs {item['stoploss']:.2f}",
+                f"T1: Rs {item['target_1']:.2f} ({item['target_1_source']}; book 50%)",
+                f"T2: Rs {item['target_2']:.2f} ({item['target_2_source']}; book 30%)",
+                f"T3: Rs {item['target_3']:.2f} ({item['target_3_source']}; book final 20%)",
                 f"T1 Risk:Reward: 1:{item['risk_reward_to_t1']:.2f}",
                 "After T1: keep remaining-position SL below support; no automatic breakeven move.",
                 f"RSI: {item['rsi']:.1f} | ADX: {item['adx']:.1f} | Volume: {item['volume_ratio']:.1f}x",
