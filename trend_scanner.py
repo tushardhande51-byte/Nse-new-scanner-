@@ -195,7 +195,7 @@ def split_telegram_message(message, max_length=3500):
                 current = ""
             chunks.append(line[:max_length])
             line = line[max_length:]
-        candidate = line if not current else current + "\\n" + line
+        candidate = line if not current else current + "\n" + line
         if len(candidate) > max_length:
             if current:
                 chunks.append(current)
@@ -215,7 +215,7 @@ def send_telegram(message):
         return False
     chunks = split_telegram_message(message)
     for index, chunk in enumerate(chunks, 1):
-        text_to_send = f"[Part {index}/{len(chunks)}]\\n{chunk}" if len(chunks) > 1 else chunk
+        text_to_send = f"[Part {index}/{len(chunks)}]\n{chunk}" if len(chunks) > 1 else chunk
         try:
             response = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
@@ -278,7 +278,7 @@ def main():
             "DOWNTREND stocks (first 30): " + (", ".join(down[:30]) if down else "None"),
             "",
         ])
-    message = "\\n".join(lines)
+    message = "\n".join(lines)
     print(message)
     delivered = send_telegram(message)
     print(f"Telegram delivered: {delivered}")
