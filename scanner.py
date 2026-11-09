@@ -1,576 +1,258 @@
+import csv
+import io
 import os
-import re
 import time
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-import requests
 import pandas as pd
-from bs4 import BeautifulSoup
+import requests
 
-SCREENER_URL = "https://www.screener.in/screens/4008468/tushar-dhande/"
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-
-EMA_FAST = 20
-EMA_SLOW = 50
-RSI_PERIOD = 14
-VOLUME_LOOKBACK = 20
+# Broker-free EOD scanner. Price history is obtained from Yahoo Finance;
+# the tradable universe is the NSE official equity list (EQ series).
+NSE_CSV_URLS = [
+    "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
+    "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
+]
+NSE_HOME = "https://www.nseindia.com/"
+YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{}.NS"
+TIMEOUT = 25
+MAX_WORKERS = 8
+MIN_ROWS = 210
 VOLUME_MULTIPLIER = 1.5
-RESISTANCE_LOOKBACK = 20
-RESISTANCE_TOLERANCE = 0.98
-
-STOPLOSS_PCT = 0.05
-TARGET_PCT = 0.10
-
-REQUEST_TIMEOUT = 20
-SLEEP_BETWEEN_REQUESTS = 0.15
+RSI_MIN, RSI_MAX = 55, 70
+ADX_MIN = 20
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0 Safari/537.36"
-    )
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+    "Accept": "application/json,text/csv,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 
-def get_session():
+def now_ist():
+    return datetime.now(ZoneInfo("Asia/Kolkata"))
+
+
+def get_nse_universe():
     session = requests.Session()
     session.headers.update(HEADERS)
-    return session
-
-
-def test_internet(session):
     try:
-        response = session.get("https://www.google.com", timeout=REQUEST_TIMEOUT)
-        print(f"Internet test: HTTP {response.status_code}")
-        return response.ok
-    except Exception as exc:
-        print(f"Internet test failed: {exc}")
-        return False
+        session.get(NSE_HOME, timeout=TIMEOUT)
+    except requests.RequestException:
+        pass
+
+    last_error = None
+    for url in NSE_CSV_URLS:
+        try:
+            response = session.get(url, timeout=TIMEOUT)
+            response.raise_for_status()
+            frame = pd.read_csv(io.BytesIO(response.content))
+            frame.columns = [str(c).strip().upper() for c in frame.columns]
+            if "SYMBOL" not in frame.columns or "SERIES" not in frame.columns:
+                raise ValueError("NSE equity CSV does not contain SYMBOL/SERIES columns")
+            frame["SYMBOL"] = frame["SYMBOL"].astype(str).str.strip()
+            frame["SERIES"] = frame["SERIES"].astype(str).str.strip().str.upper()
+            frame = frame[(frame["SERIES"] == "EQ") & frame["SYMBOL"].str.fullmatch(r"[A-Z0-9&._-]+")]
+            frame = frame.drop_duplicates("SYMBOL")
+            if frame.empty:
+                raise ValueError("NSE equity universe is empty")
+            name_col = "NAME OF COMPANY" if "NAME OF COMPANY" in frame.columns else None
+            return [
+                (row["SYMBOL"], str(row[name_col]).strip() if name_col else row["SYMBOL"])
+                for _, row in frame.iterrows()
+            ]
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Could not download official NSE equity list: {last_error}")
 
 
-def extract_symbol_from_row(row):
-    link = row.find("a")
-    if not link:
-        return None, None
-
-    name = link.get_text(" ", strip=True)
-    href = link.get("href", "")
-
-    match = re.search(r"/company/([^/]+)/", href)
-    if match:
-        slug = match.group(1).strip().upper()
-    else:
-        slug = None
-
-    return name, slug
-
-
-def get_screener_stocks(session):
-    print("")
-    print("========================================")
-    print("STAGE 1 - SCREENER FUNDAMENTAL SCREEN")
-    print("========================================")
-    print(f"URL: {SCREENER_URL}")
-
-    try:
-        response = session.get(
-            SCREENER_URL,
-            timeout=REQUEST_TIMEOUT,
-            allow_redirects=True,
-        )
-        print(f"Screener HTTP: {response.status_code}")
-
-        if response.status_code != 200:
-            return []
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        table = soup.select_one("table.data-table")
-
-        if not table:
-            print("Screener table not found.")
-            return []
-
-        stocks = []
-        seen = set()
-
-        for row in table.select("tbody tr"):
-            name, symbol = extract_symbol_from_row(row)
-
-            if not name or not symbol:
+def fetch_history(symbol):
+    url = YAHOO_CHART.format(requests.utils.quote(symbol, safe=""))
+    params = {"range": "1y", "interval": "1d", "events": "history"}
+    for attempt in range(3):
+        try:
+            response = requests.get(url, params=params, headers=HEADERS, timeout=TIMEOUT)
+            if response.status_code == 429:
+                time.sleep(2 ** (attempt + 1))
                 continue
-
-            key = symbol.upper()
-            if key in seen:
-                continue
-
-            seen.add(key)
-            stocks.append({
-                "name": name,
-                "symbol": key,
-            })
-
-        print(f"Fundamental stocks found: {len(stocks)}")
-        return stocks
-
-    except Exception as exc:
-        print(f"Screener error: {exc}")
-        return []
-
-
-def prepare_nse_stocks(stocks):
-    print("")
-    print("========================================")
-    print("PREPARING NSE SYMBOLS")
-    print("========================================")
-
-    valid = []
-    skipped_numeric = []
-
-    for item in stocks:
-        symbol = item["symbol"].strip().upper()
-
-        # Screener can expose BSE security codes such as 532015.
-        # Yahoo Finance cannot use these directly as NSE tickers.
-        if symbol.isdigit():
-            skipped_numeric.append(symbol)
-            print(f"SKIP BSE CODE: {symbol}")
-            continue
-
-        if not re.fullmatch(r"[A-Z0-9&._-]+", symbol):
-            print(f"SKIP INVALID SYMBOL: {symbol}")
-            continue
-
-        item = dict(item)
-        item["yahoo_symbol"] = f"{symbol}.NS"
-        valid.append(item)
-
-    print(f"Valid NSE-style symbols: {len(valid)}")
-    print(f"Numeric BSE codes skipped: {len(skipped_numeric)}")
-    return valid
+            response.raise_for_status()
+            payload = response.json().get("chart", {})
+            if payload.get("error") or not payload.get("result"):
+                return None
+            result = payload["result"][0]
+            quote = result["indicators"]["quote"][0]
+            frame = pd.DataFrame({
+                "date": pd.to_datetime(result["timestamp"], unit="s", utc=True),
+                "high": quote.get("high"),
+                "low": quote.get("low"),
+                "close": quote.get("close"),
+                "volume": quote.get("volume"),
+            }).dropna()
+            frame = frame.sort_values("date").reset_index(drop=True)
+            return frame if len(frame) >= MIN_ROWS else None
+        except Exception:
+            if attempt < 2:
+                time.sleep(1 + attempt)
+    return None
 
 
-def yahoo_chart_url(yahoo_symbol):
-    return (
-        "https://query1.finance.yahoo.com/v8/finance/chart/"
-        f"{yahoo_symbol}?range=1y&interval=1d&events=history"
-    )
-
-
-def get_price_data(session, yahoo_symbol):
-    try:
-        response = session.get(
-            yahoo_chart_url(yahoo_symbol),
-            timeout=REQUEST_TIMEOUT,
-        )
-
-        if response.status_code != 200:
-            print(f"{yahoo_symbol} -> Yahoo HTTP {response.status_code}")
-            return None
-
-        payload = response.json()
-        chart = payload.get("chart", {})
-        result = chart.get("result")
-
-        if not result:
-            print(f"{yahoo_symbol} -> no Yahoo result")
-            return None
-
-        result = result[0]
-        timestamps = result.get("timestamp", [])
-        quote_list = result.get("indicators", {}).get("quote", [])
-
-        if not timestamps or not quote_list:
-            print(f"{yahoo_symbol} -> no OHLC data")
-            return None
-
-        quote = quote_list[0]
-
-        df = pd.DataFrame({
-            "timestamp": timestamps,
-            "open": quote.get("open", []),
-            "high": quote.get("high", []),
-            "low": quote.get("low", []),
-            "close": quote.get("close", []),
-            "volume": quote.get("volume", []),
-        })
-
-        if df.empty:
-            return None
-
-        df["date"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
-        df = df.drop(columns=["timestamp"])
-        df = df.dropna(subset=["close", "high", "low", "volume"])
-        df = df.sort_values("date").reset_index(drop=True)
-
-        if len(df) < 100:
-            print(f"{yahoo_symbol} -> insufficient data: {len(df)} rows")
-            return None
-
-        return df
-
-    except Exception as exc:
-        print(f"{yahoo_symbol} -> data error: {exc}")
-        return None
-
-
-def calculate_rsi(series, period=14):
+def rsi(series, period=14):
     delta = series.diff()
-
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(
-        alpha=1 / period,
-        min_periods=period,
-        adjust=False,
-    ).mean()
-
-    avg_loss = loss.ewm(
-        alpha=1 / period,
-        min_periods=period,
-        adjust=False,
-    ).mean()
-
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
-    rsi = 100 - (100 / (1 + rs))
-
-    # Handle periods with no losses.
-    rsi = rsi.fillna(100)
-    return rsi
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = losses.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    result = 100 - 100 / (1 + rs)
+    result = result.mask((avg_loss == 0) & (avg_gain > 0), 100)
+    result = result.mask((avg_loss == 0) & (avg_gain == 0), 50)
+    return result
 
 
-def add_indicators(df):
-    data = df.copy()
-
-    data["ema20"] = data["close"].ewm(
-        span=EMA_FAST,
-        adjust=False,
-    ).mean()
-
-    data["ema50"] = data["close"].ewm(
-        span=EMA_SLOW,
-        adjust=False,
-    ).mean()
-
-    data["rsi14"] = calculate_rsi(data["close"], RSI_PERIOD)
-
-    data["volume_avg20"] = data["volume"].rolling(
-        VOLUME_LOOKBACK
-    ).mean()
-
-    # Previous 20-day high excludes today's candle.
-    data["previous_20_high"] = data["high"].shift(1).rolling(
-        RESISTANCE_LOOKBACK
-    ).max()
-
-    return data
+def adx(frame, period=14):
+    high, low, close = frame["high"], frame["low"], frame["close"]
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    previous_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - previous_close).abs(),
+        (low - previous_close).abs(),
+    ], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / atr
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, float("nan"))
+    return dx.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
 
-def check_six_filters(df):
-    if df is None or len(df) < 100:
+def evaluate(symbol, company):
+    frame = fetch_history(symbol)
+    if frame is None or len(frame) < MIN_ROWS:
+        return None
+    close = frame["close"]
+    frame["ema20"] = close.ewm(span=20, adjust=False).mean()
+    frame["ema50"] = close.ewm(span=50, adjust=False).mean()
+    frame["rsi14"] = rsi(close)
+    frame["avg_volume20"] = frame["volume"].rolling(20).mean()
+    frame["prior_high20"] = frame["high"].shift(1).rolling(20).max()
+    frame["adx14"] = adx(frame)
+    row = frame.iloc[-1]
+    needed = ["close", "ema20", "ema50", "rsi14", "volume", "avg_volume20", "prior_high20", "adx14"]
+    if row[needed].isna().any():
         return None
 
-    data = add_indicators(df)
-    latest = data.iloc[-1]
-
-    required = [
-        latest["close"],
-        latest["ema20"],
-        latest["ema50"],
-        latest["rsi14"],
-        latest["volume"],
-        latest["volume_avg20"],
-        latest["previous_20_high"],
-    ]
-
-    if any(pd.isna(value) for value in required):
-        return None
-
-    close = float(latest["close"])
-    ema20 = float(latest["ema20"])
-    ema50 = float(latest["ema50"])
-    rsi = float(latest["rsi14"])
-    volume = float(latest["volume"])
-    volume_avg20 = float(latest["volume_avg20"])
-    previous_20_high = float(latest["previous_20_high"])
-
-    filters = {
-        "Trend": close > ema20 and ema20 > ema50,
-        "EMA": close > ema20,
-        "RSI": 55 <= rsi <= 70,
-        "Volume": volume > volume_avg20 * VOLUME_MULTIPLIER,
-        "Resistance": close >= previous_20_high * RESISTANCE_TOLERANCE,
-        "Breakout": close > previous_20_high,
+    # Six independent conditions: trend/structure, momentum, participation,
+    # breakout, and trend strength. No duplicated "near resistance" condition.
+    checks = {
+        "Close > EMA20": row.close > row.ema20,
+        "EMA20 > EMA50": row.ema20 > row.ema50,
+        "RSI 55-70": RSI_MIN <= row.rsi14 <= RSI_MAX,
+        "Volume > 1.5x 20D avg": row.volume > row.avg_volume20 * VOLUME_MULTIPLIER,
+        "20D breakout": row.close > row.prior_high20,
+        "ADX > 20": row.adx14 > ADX_MIN,
     }
-
-    passed = sum(filters.values())
-
+    passed = sum(bool(value) for value in checks.values())
     if passed != 6:
-        return {
-            "passed": passed,
-            "filters": filters,
-            "close": close,
-            "ema20": ema20,
-            "ema50": ema50,
-            "rsi": rsi,
-            "volume": volume,
-            "volume_avg20": volume_avg20,
-            "previous_20_high": previous_20_high,
-        }
+        return None
 
-    entry = close
-    stoploss = entry * (1 - STOPLOSS_PCT)
-    target = entry * (1 + TARGET_PCT)
-
+    entry = float(row.close)
     return {
-        "passed": 6,
-        "filters": filters,
-        "close": close,
-        "ema20": ema20,
-        "ema50": ema50,
-        "rsi": rsi,
-        "volume": volume,
-        "volume_avg20": volume_avg20,
-        "previous_20_high": previous_20_high,
+        "symbol": symbol,
+        "company": company,
+        "date": str(row.date.date()),
+        "close": entry,
+        "ema20": float(row.ema20),
+        "ema50": float(row.ema50),
+        "rsi": float(row.rsi14),
+        "adx": float(row.adx14),
+        "volume_ratio": float(row.volume / row.avg_volume20),
         "entry": entry,
-        "stoploss": stoploss,
-        "target": target,
+        "stoploss": entry * 0.95,
+        "target": entry * 1.10,
+        "filters_passed": "6/6",
     }
-
-
-def price_data_test(session, stocks, count=5):
-    print("")
-    print("========================================")
-    print("PRICE DATA TEST")
-    print("========================================")
-
-    if not stocks:
-        print("No valid stocks to test.")
-        return 0
-
-    test_stocks = stocks[:count]
-    success = 0
-
-    for item in test_stocks:
-        symbol = item["yahoo_symbol"]
-        df = get_price_data(session, symbol)
-
-        if df is not None and not df.empty:
-            success += 1
-            print(f"{symbol} -> OK ({len(df)} rows)")
-        else:
-            print(f"{symbol} -> FAILED")
-
-        time.sleep(SLEEP_BETWEEN_REQUESTS)
-
-    print(f"Price data test: {success}/{len(test_stocks)}")
-    return success
-
-
-def scan_stocks(session, stocks):
-    print("")
-    print("========================================")
-    print("STAGE 2 - TECHNICAL 6/6 SCAN")
-    print("========================================")
-
-    results = []
-    total = len(stocks)
-
-    for index, item in enumerate(stocks, start=1):
-        name = item["name"]
-        symbol = item["symbol"]
-        yahoo_symbol = item["yahoo_symbol"]
-
-        print(f"[{index}/{total}] {symbol}")
-
-        df = get_price_data(session, yahoo_symbol)
-
-        if df is None:
-            time.sleep(SLEEP_BETWEEN_REQUESTS)
-            continue
-
-        result = check_six_filters(df)
-
-        if result is None:
-            print(f"{symbol} -> insufficient indicator data")
-            time.sleep(SLEEP_BETWEEN_REQUESTS)
-            continue
-
-        print(
-            f"{symbol} -> {result['passed']}/6 "
-            f"(RSI {result['rsi']:.2f})"
-        )
-
-        if result["passed"] == 6:
-            results.append({
-                "name": name,
-                "symbol": symbol,
-                "entry": result["entry"],
-                "stoploss": result["stoploss"],
-                "target": result["target"],
-                "rsi": result["rsi"],
-            })
-
-        time.sleep(SLEEP_BETWEEN_REQUESTS)
-
-    return results
-
-
-def format_price(value):
-    return f"â‚¹{value:,.2f}"
-
-
-def build_telegram_message(results):
-    today = datetime.now(timezone.utc).strftime("%d-%m-%Y")
-
-    lines = [
-        "ðŸš€ NSE SWING SCANNER",
-        "",
-        f"Date: {today}",
-        "Fundamental: Screener",
-        "Technical: 6/6 filters",
-        "",
-    ]
-
-    if not results:
-        lines.extend([
-            "âŒ No 6/6 stock found.",
-            "",
-            "Filters:",
-            "1. Close > EMA20 > EMA50",
-            "2. Close > EMA20",
-            "3. RSI 55-70",
-            "4. Volume > 20D average Ã— 1.5",
-            "5. Near previous 20D resistance",
-            "6. Breakout above previous 20D high",
-        ])
-        return "\n".join(lines)
-
-    lines.append(f"âœ… FINAL BUY COUNT: {len(results)}")
-    lines.append("")
-
-    for number, item in enumerate(results, start=1):
-        lines.extend([
-            f"{number}. {item['symbol']} - {item['name']}",
-            f"Entry: {format_price(item['entry'])}",
-            f"Stoploss: {format_price(item['stoploss'])}",
-            f"Target: {format_price(item['target'])}",
-            f"RSI: {item['rsi']:.2f}",
-            "",
-        ])
-
-    return "\n".join(lines)
 
 
 def send_telegram(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram secrets are not configured.")
-        print("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.")
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        print("Telegram not sent: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secrets missing.")
         return False
-
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
-    )
-
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-    }
-
     try:
         response = requests.post(
-            url,
-            json=payload,
-            timeout=REQUEST_TIMEOUT,
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": message, "disable_web_page_preview": True},
+            timeout=TIMEOUT,
         )
-
-        print(f"Telegram HTTP: {response.status_code}")
-
-        if response.ok:
-            print("Telegram message sent successfully.")
-            return True
-
-        print(f"Telegram error: {response.text}")
-        return False
-
+        response.raise_for_status()
+        return bool(response.json().get("ok"))
     except Exception as exc:
-        print(f"Telegram send error: {exc}")
+        print(f"Telegram delivery failed: {exc}")
         return False
-
-
-def print_final_report(results):
-    print("")
-    print("========================================")
-    print("FINAL TECHNICAL REPORT")
-    print("========================================")
-
-    if not results:
-        print("No 6/6 stock found.")
-        return
-
-    print(f"FINAL BUY COUNT: {len(results)}")
-    print("")
-
-    for number, item in enumerate(results, start=1):
-        print(f"{number}. {item['symbol']} - {item['name']}")
-        print(f"   Entry    : {format_price(item['entry'])}")
-        print(f"   Stoploss : {format_price(item['stoploss'])}")
-        print(f"   Target   : {format_price(item['target'])}")
-        print(f"   RSI      : {item['rsi']:.2f}")
-        print("")
 
 
 def main():
-    print("========================================")
-    print("NSE SWING SCANNER")
-    print("========================================")
-    print("Strategy: Fundamental + Technical 6/6")
-    print("Timeframe: Daily")
-    print("Capital calculation: OFF")
-    print("Quantity calculation: OFF")
-    print("Risk calculation: OFF")
-    print("")
+    started = now_ist()
+    print(f"NSE EOD TECHNICAL SCANNER | {started:%Y-%m-%d %H:%M:%S %Z}")
+    print("No broker connection or order placement.")
+    universe = get_nse_universe()
+    print(f"NSE EQ symbols downloaded: {len(universe)}")
 
-    session = get_session()
+    matches, errors = [], 0
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(evaluate, symbol, company): symbol for symbol, company in universe}
+        for count, future in enumerate(as_completed(futures), 1):
+            symbol = futures[future]
+            try:
+                result = future.result()
+                if result:
+                    matches.append(result)
+                    print(f"6/6 MATCH: {symbol}")
+            except Exception as exc:
+                errors += 1
+                print(f"ERROR {symbol}: {exc}")
+            if count % 100 == 0:
+                print(f"Progress: {count}/{len(universe)} | matches={len(matches)} | errors={errors}")
 
-    if not test_internet(session):
-        print("Internet connection failed. Stopping.")
-        return
+    matches.sort(key=lambda item: (item["adx"], item["volume_ratio"]), reverse=True)
+    output = pd.DataFrame(matches)
+    output.to_csv("nse_swing_signals.csv", index=False)
 
-    fundamental_stocks = get_screener_stocks(session)
-
-    if not fundamental_stocks:
-        print("No fundamental stocks found. Stopping.")
-        return
-
-    nse_stocks = prepare_nse_stocks(fundamental_stocks)
-
-    if not nse_stocks:
-        print("No valid NSE symbols available. Stopping.")
-        return
-
-    test_success = price_data_test(session, nse_stocks, count=5)
-
-    if test_success == 0:
-        print("")
-        print("No Yahoo price data available for the test symbols.")
-        print("Technical scan stopped.")
-        return
-
-    results = scan_stocks(session, nse_stocks)
-
-    print_final_report(results)
-
-    telegram_message = build_telegram_message(results)
-    send_telegram(telegram_message)
-
-    print("")
-    print("========================================")
-    print("SCAN COMPLETED")
-    print("========================================")
+    report_date = now_ist().strftime("%d-%m-%Y")
+    lines = [
+        "NSE SWING SCANNER - EOD",
+        f"Date: {report_date}",
+        f"Universe: {len(universe)} NSE EQ symbols",
+        "Signal rule: strict 6/6 | No orders placed",
+        "",
+    ]
+    if not matches:
+        lines.append("No stock passed all 6 filters today.")
+    else:
+        lines.append(f"6/6 matches: {len(matches)}")
+        for item in matches[:25]:
+            lines.extend([
+                f"{item['symbol']} - {item['company']}",
+                f"Close/Entry: Rs {item['entry']:.2f}",
+                f"Stop-loss (illustrative 5%): Rs {item['stoploss']:.2f}",
+                f"Target (illustrative 10%): Rs {item['target']:.2f}",
+                f"RSI: {item['rsi']:.1f} | ADX: {item['adx']:.1f} | Volume: {item['volume_ratio']:.1f}x",
+                "",
+            ])
+        if len(matches) > 25:
+            lines.append(f"Full list: nse_swing_signals.csv ({len(matches)} stocks)")
+    lines.extend(["", "Data: NSE EQ universe + Yahoo Finance daily candles. Verify prices before trading."])
+    message = "\n".join(lines)
+    print(message)
+    delivered = send_telegram(message)
+    print(f"Telegram delivered: {delivered}")
+    print(f"Finished: {now_ist():%Y-%m-%d %H:%M:%S %Z}; data errors={errors}; matches={len(matches)}")
 
 
 if __name__ == "__main__":
