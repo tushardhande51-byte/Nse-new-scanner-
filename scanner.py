@@ -288,7 +288,8 @@ def main():
         "NSE SWING SCANNER - EOD",
         f"Date: {report_date}",
         f"Universe: {len(universe)} NSE EQ symbols",
-        "Signal rule: strict 6/6 + 3 pivot resistance targets + T1 R:R >= 1.5 | No orders placed",\n        "Booking plan: T1 50%, T2 30%, T3 remaining 20%; after T1 keep SL below support.",
+        "Signal rule: strict 6/6 + 3 pivot resistance targets + T1 R:R >= 1.5 | No orders placed",
+        "Booking plan: T1 50%, T2 30%, T3 remaining 20%; after T1 keep SL below support.",
         "",
     ]
     if not matches:
