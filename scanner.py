@@ -411,23 +411,62 @@ def evaluate(symbol, company):
     }
 
 
+def split_telegram_message(message, max_length=3500):
+    """Split long Telegram text into safe chunks without cutting normal lines."""
+    chunks = []
+    current = ""
+    for line in message.splitlines():
+        # A single unusually long line is split safely as a last resort.
+        while len(line) > max_length:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:max_length])
+            line = line[max_length:]
+        candidate = line if not current else current + "\\n" + line
+        if len(candidate) > max_length:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [""]
+
+
 def send_telegram(message):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
         print("Telegram not sent: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secrets missing.")
         return False
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message, "disable_web_page_preview": True},
-            timeout=TIMEOUT,
-        )
-        response.raise_for_status()
-        return bool(response.json().get("ok"))
-    except Exception as exc:
-        print(f"Telegram delivery failed: {exc}")
-        return False
+
+    chunks = split_telegram_message(message, max_length=3500)
+    total = len(chunks)
+    for index, chunk in enumerate(chunks, 1):
+        # Add a short part marker only when the report needs multiple messages.
+        text_to_send = f"[Part {index}/{total}]\\n{chunk}" if total > 1 else chunk
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text_to_send, "disable_web_page_preview": True},
+                timeout=TIMEOUT,
+            )
+            if not response.ok:
+                print(f"Telegram delivery failed on part {index}/{total}: HTTP {response.status_code} - {response.text[:500]}")
+                return False
+            payload = response.json()
+            if not payload.get("ok"):
+                print(f"Telegram delivery failed on part {index}/{total}: {payload}")
+                return False
+            print(f"Telegram part delivered: {index}/{total}")
+        except Exception as exc:
+            print(f"Telegram delivery failed on part {index}/{total}: {exc}")
+            return False
+        if index < total:
+            time.sleep(1)
+    return True
 
 
 def main():
