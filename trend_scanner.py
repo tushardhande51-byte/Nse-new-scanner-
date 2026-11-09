@@ -183,3 +183,107 @@ def scan_symbol(item):
         "1 HOUR": classify_close_direction(hourly_closed),
     }
 
+
+
+
+def split_telegram_message(message, max_length=3500):
+    chunks, current = [], ""
+    for line in message.splitlines():
+        while len(line) > max_length:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:max_length])
+            line = line[max_length:]
+        candidate = line if not current else current + "\\n" + line
+        if len(candidate) > max_length:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [""]
+
+
+def send_telegram(message):
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        print("Telegram not sent: bot token/chat ID secret missing.")
+        return False
+    chunks = split_telegram_message(message)
+    for index, chunk in enumerate(chunks, 1):
+        text_to_send = f"[Part {index}/{len(chunks)}]\\n{chunk}" if len(chunks) > 1 else chunk
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text_to_send, "disable_web_page_preview": True},
+                timeout=TIMEOUT,
+            )
+            if not response.ok or not response.json().get("ok"):
+                print(f"Telegram error part {index}/{len(chunks)}: HTTP {response.status_code} {response.text[:400]}")
+                return False
+            print(f"Telegram part delivered: {index}/{len(chunks)}")
+        except Exception as exc:
+            print(f"Telegram delivery failed: {exc}")
+            return False
+        if index < len(chunks):
+            time.sleep(1)
+    return True
+
+
+def main():
+    started = now_ist()
+    print(f"NSE MULTI-TIMEFRAME TREND SCANNER | {started:%Y-%m-%d %H:%M:%S %Z}")
+    print("Trend rule: compare CLOSE of the last two fully closed candles only; higher = UPTREND, lower = DOWNTREND, equal = SIDEWAYS. No EMA.")
+    print("Timeframes: Monthly, Weekly, Daily, 1 Hour. This scanner is separate from the Daily 6/6 swing scanner.")
+    universe = get_nse_universe()
+    print(f"NSE EQ symbols downloaded: {len(universe)}")
+    results, errors = [], 0
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(scan_symbol, item): item[0] for item in universe}
+        for count, future in enumerate(as_completed(futures), 1):
+            symbol = futures[future]
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as exc:
+                errors += 1
+                print(f"ERROR {symbol}: {exc}")
+            if count % 100 == 0:
+                print(f"Progress: {count}/{len(universe)} | scanned={len(results)} | errors={errors}")
+    results.sort(key=lambda x: x["symbol"])
+    output = pd.DataFrame(results)
+    output.to_csv("nse_timeframe_trends.csv", index=False)
+
+    lines = [
+        "NSE MULTI-TIMEFRAME TREND REPORT",
+        f"Date: {now_ist():%d-%m-%Y %H:%M IST}",
+        f"Universe: {len(universe)} NSE EQ symbols | scanned rows: {len(results)} | errors: {errors}",
+        "Trend definition: compare the last two fully closed candle CLOSE values only; higher = UPTREND, lower = DOWNTREND, equal = SIDEWAYS. No EMA.",
+        "Only completed candles are used; unfinished current candles are excluded.",
+        "Full stock-wise report: download nse_timeframe_trends.csv from the GitHub Actions artifact.",
+        "",
+    ]
+    for timeframe in ["MONTHLY", "WEEKLY", "DAILY", "1 HOUR"]:
+        up = [x["symbol"] for x in results if x.get(timeframe) == "UPTREND"]
+        down = [x["symbol"] for x in results if x.get(timeframe) == "DOWNTREND"]
+        side = [x["symbol"] for x in results if x.get(timeframe) == "SIDEWAYS"]
+        missing = sum(1 for x in results if x.get(timeframe) == "DATA NOT AVAILABLE")
+        lines.extend([
+            f"{timeframe}: UP {len(up)} | DOWN {len(down)} | SIDEWAYS {len(side)} | DATA N/A {missing}",
+            "UPTREND stocks (first 30): " + (", ".join(up[:30]) if up else "None"),
+            "DOWNTREND stocks (first 30): " + (", ".join(down[:30]) if down else "None"),
+            "",
+        ])
+    message = "\\n".join(lines)
+    print(message)
+    delivered = send_telegram(message)
+    print(f"Telegram delivered: {delivered}")
+    print(f"Finished: {now_ist():%Y-%m-%d %H:%M:%S %Z}; errors={errors}; rows={len(results)}")
+
+
+if __name__ == "__main__":
+    main()
