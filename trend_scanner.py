@@ -174,6 +174,7 @@ def scan_symbol(item):
     hourly_raw = fetch_chart(symbol, "730d", "60m", min_rows=2)
     hourly_closed = keep_only_closed_hourly_bars(hourly_raw, now)
 
+    previous_day_close = float(pd.to_numeric(daily_closed["close"], errors="coerce").dropna().iloc[-1]) if daily_closed is not None and not daily_closed.empty else None
     return {
         "symbol": symbol,
         "company": company,
@@ -181,7 +182,47 @@ def scan_symbol(item):
         "WEEKLY": classify_close_direction(weekly_closed),
         "DAILY": classify_close_direction(daily_closed),
         "1 HOUR": classify_close_direction(hourly_closed),
+        "PREVIOUS_DAY_CLOSE": previous_day_close,
     }
+
+
+def confirm_opening_45m(row, now):
+    """Confirm all three completed 15m candle CLOSES against the previous NSE session close."""
+    if now.hour < 10:
+        return "NOT READY"
+    previous_close = row.get("PREVIOUS_DAY_CLOSE")
+    if previous_close is None or pd.isna(previous_close):
+        return "DATA NOT AVAILABLE"
+
+    intraday = fetch_chart(row["symbol"], "5d", "15m", min_rows=3)
+    if intraday is None or intraday.empty:
+        return "DATA NOT AVAILABLE"
+
+    local_starts = intraday["date"].dt.tz_convert("Asia/Kolkata")
+    today = local_starts.dt.date == now.date()
+    expected = [(9, 15), (9, 30), (9, 45)]
+    selected = intraday.loc[today].copy()
+    selected["_hour"] = local_starts.loc[today].dt.hour
+    selected["_minute"] = local_starts.loc[today].dt.minute
+    selected = selected.set_index(["_hour", "_minute"])
+
+    closes = []
+    for hour_minute in expected:
+        if hour_minute not in selected.index:
+            return "DATA NOT AVAILABLE"
+        candle = selected.loc[hour_minute]
+        if isinstance(candle, pd.DataFrame):
+            candle = candle.iloc[-1]
+        candle_start = now.replace(hour=hour_minute[0], minute=hour_minute[1], second=0, microsecond=0)
+        if candle_start + pd.Timedelta(minutes=15) > now:
+            return "NOT READY"
+        closes.append(float(candle["close"]))
+
+    if all(value > float(previous_close) for value in closes):
+        return "UPTREND"
+    if all(value < float(previous_close) for value in closes):
+        return "DOWNTREND"
+    return "FAIL"
 
 
 
@@ -267,33 +308,49 @@ def main():
         else:
             row["ALIGNMENT"] = "MIXED / SIDEWAYS"
 
-    output = pd.DataFrame(results, columns=["symbol", "company", "MONTHLY", "WEEKLY", "DAILY", "1 HOUR", "ALIGNMENT"])
-    output.to_csv("nse_timeframe_trends.csv", index=False)
+    # Only four-timeframe aligned stocks are eligible for the live 45-minute confirmation.
+    base_aligned = [x for x in results if x.get("ALIGNMENT") in ("4/4 UPTREND", "4/4 DOWNTREND")]
+    live_checked = []
+    if now_ist().hour < 10:
+        print("Opening 45-minute filter is not ready before 10:00 IST; no stocks will be published.")
+    else:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            checks = {pool.submit(confirm_opening_45m, row, now_ist()): row for row in base_aligned}
+            for future in as_completed(checks):
+                row = checks[future]
+                try:
+                    confirmation = future.result()
+                except Exception as exc:
+                    print(f"15m confirmation error {row['symbol']}: {exc}")
+                    confirmation = "DATA NOT AVAILABLE"
+                expected_direction = "UPTREND" if row["ALIGNMENT"] == "4/4 UPTREND" else "DOWNTREND"
+                if confirmation == expected_direction:
+                    row["15M 45MIN"] = confirmation
+                    row["ALIGNMENT"] = "5/5 UPTREND" if expected_direction == "UPTREND" else "5/5 DOWNTREND"
+                    live_checked.append(row)
 
-    all_up = [x["symbol"] for x in results if x.get("ALIGNMENT") == "4/4 UPTREND"]
-    all_down = [x["symbol"] for x in results if x.get("ALIGNMENT") == "4/4 DOWNTREND"]
-
-    # Final scanner output contains only stocks aligned in the same direction
-    # across Monthly, Weekly, Daily and 1 Hour. Mixed/sideways/incomplete are excluded.
-    aligned = [x for x in results if x.get("ALIGNMENT") in ("4/4 UPTREND", "4/4 DOWNTREND")]
+    all_up = [x["symbol"] for x in live_checked if x.get("ALIGNMENT") == "5/5 UPTREND"]
+    all_down = [x["symbol"] for x in live_checked if x.get("ALIGNMENT") == "5/5 DOWNTREND"]
+    live_checked.sort(key=lambda x: x["symbol"])
     pd.DataFrame(
-        aligned,
-        columns=["symbol", "company", "MONTHLY", "WEEKLY", "DAILY", "1 HOUR", "ALIGNMENT"],
+        live_checked,
+        columns=["symbol", "company", "MONTHLY", "WEEKLY", "DAILY", "1 HOUR", "15M 45MIN", "ALIGNMENT"],
     ).to_csv("nse_timeframe_trends.csv", index=False)
 
     lines = [
-        "NSE MULTI-TIMEFRAME TREND REPORT",
+        "NSE MULTI-TIMEFRAME + LIVE 45-MIN TREND REPORT",
         f"Date: {now_ist():%d-%m-%Y %H:%M IST}",
         f"Universe: {len(universe)} NSE EQ symbols | scanned rows: {len(results)} | errors: {errors}",
-        "Rule: only last two fully closed candle CLOSE values are compared; no EMA and no unfinished candles.",
-        "Only stocks with all FOUR timeframes agreeing are shown. Mixed, sideways and incomplete-data stocks are excluded.",
-        f"4/4 UPTREND (Monthly + Weekly + Daily + 1 Hour): {len(all_up)}",
+        "First 4 filters: Monthly, Weekly, Daily and 1 Hour close-to-close direction must all agree.",
+        "5th filter: first three completed 15-minute candle CLOSES (09:15, 09:30, 09:45) must ALL be above previous session close for UPTREND, or ALL below it for DOWNTREND. High/Low are ignored.",
+        "Only stocks passing all 5 filters are shown. Mixed, sideways, incomplete and 15m-failed stocks are excluded.",
+        f"5/5 UPTREND: {len(all_up)}",
         "Stocks: " + (", ".join(all_up) if all_up else "None"),
         "",
-        f"4/4 DOWNTREND (Monthly + Weekly + Daily + 1 Hour): {len(all_down)}",
+        f"5/5 DOWNTREND: {len(all_down)}",
         "Stocks: " + (", ".join(all_down) if all_down else "None"),
         "",
-        "CSV artifact contains only these 4/4 aligned UPTREND and DOWNTREND stocks.",
+        "CSV artifact contains only stocks passing all five filters.",
     ]
     message = "\n".join(lines)
     print(message)
