@@ -170,28 +170,34 @@ def support_resistance_levels(frame, entry):
             resistance_zones.append(level)
 
     risk = entry - stoploss
-    # Use real overhead pivot zones where available. If fewer than three exist,
-    # complete the plan with clearly-labelled risk-multiple projection targets.
-    targets, target_sources = [], []
+    # Prefer actual overhead pivot resistance. Only use projections when a
+    # usable pivot level is unavailable; never label a projection as resistance.
+    targets, target_sources, target_resistance_prices = [], [], []
+    projection_multiples = [1.1, 2.0, 3.0]
     for i in range(3):
         if i < len(resistance_zones):
-            candidate = resistance_zones[i] * (1 - LEVEL_BUFFER_PCT)
+            raw_resistance = resistance_zones[i]
+            candidate = raw_resistance * (1 - LEVEL_BUFFER_PCT)
             if candidate > entry and (not targets or candidate > targets[-1]):
                 targets.append(candidate)
-                target_sources.append("Pivot resistance")
+                target_sources.append("Actual pivot resistance")
+                target_resistance_prices.append(raw_resistance)
                 continue
-        multiples = [1.1, 2.0, 3.0]
-        candidate = entry + risk * multiples[i]
+
+        candidate = entry + risk * projection_multiples[i]
         if targets and candidate <= targets[-1]:
             candidate = targets[-1] + risk * 0.5
+        actual_multiple = (candidate - entry) / risk if risk > 0 else 0
         targets.append(candidate)
-        target_sources.append(f"{multiples[i]:.1f}R projection")
+        target_sources.append(f"Projected target ({actual_multiple:.2f}R; no usable pivot)")
+        target_resistance_prices.append(None)
 
     reward_to_t1 = targets[0] - entry
     risk_reward_t1 = reward_to_t1 / risk if risk > 0 else 0
     resistances = (resistance_zones + [None, None, None])[:3]
     # After T1, keep the remaining-position stop below the original support.
-    return support, resistances, stoploss, targets, risk_reward_t1, support_source, target_sources
+    return (support, resistances, stoploss, targets, risk_reward_t1,
+            support_source, target_sources, target_resistance_prices)
 
 def evaluate(symbol, company):
     frame = fetch_history(symbol)
@@ -222,7 +228,8 @@ def evaluate(symbol, company):
 
     entry = float(row.close)
     levels = support_resistance_levels(frame, entry)
-    support, resistances, stoploss, targets, risk_reward_t1, support_source, target_sources = levels
+    (support, resistances, stoploss, targets, risk_reward_t1, support_source,
+     target_sources, target_resistance_prices) = levels
 
     return {
         "symbol": symbol,
@@ -243,11 +250,17 @@ def evaluate(symbol, company):
         "target_1_source": target_sources[0],
         "target_2_source": target_sources[1],
         "target_3_source": target_sources[2],
+        "target_1_resistance_price": target_resistance_prices[0],
+        "target_2_resistance_price": target_resistance_prices[1],
+        "target_3_resistance_price": target_resistance_prices[2],
         "stoploss": stoploss,
         "target_1": targets[0],
         "target_2": targets[1],
         "target_3": targets[2],
         "risk_reward_to_t1": risk_reward_t1,
+        "rr_assessment": ("LOW R:R - caution" if risk_reward_t1 < 1.0 else
+                          "MODERATE R:R - check risk" if risk_reward_t1 < 1.5 else
+                          "R:R 1.5 or higher"),
         "booking_plan": "50%-30%-20%",
         "stoploss_after_t1": "Keep below support",
         "filters_passed": "6/6",
@@ -307,6 +320,7 @@ def main():
         f"Date: {report_date}",
         f"Universe: {len(universe)} NSE EQ symbols",
         "Signal rule: strict 6/6 only; R:R is displayed, never used to reject a stock | No orders placed",
+        "Target labels: actual pivot resistance is shown with its price; projections are clearly labelled and are not resistance levels.",
         "Booking plan: T1 50%, T2 30%, T3 remaining 20%; after T1 keep SL below support.",
         "",
     ]
@@ -319,10 +333,13 @@ def main():
                 f"{item['symbol']} - {item['company']}",
                 f"Entry: Rs {item['entry']:.2f}",
                 f"Support: Rs {item['support']:.2f} ({item['support_source']}) | Stop-loss: Rs {item['stoploss']:.2f}",
-                f"T1: Rs {item['target_1']:.2f} ({item['target_1_source']}; book 50%)",
-                f"T2: Rs {item['target_2']:.2f} ({item['target_2_source']}; book 30%)",
-                f"T3: Rs {item['target_3']:.2f} ({item['target_3_source']}; book final 20%)",
-                f"T1 Risk:Reward: 1:{item['risk_reward_to_t1']:.2f}",
+                f"T1: Rs {item['target_1']:.2f} | {item['target_1_source']}" +
+                    (f" at Rs {item['target_1_resistance_price']:.2f}" if item["target_1_resistance_price"] is not None else "") + " | book 50%",
+                f"T2: Rs {item['target_2']:.2f} | {item['target_2_source']}" +
+                    (f" at Rs {item['target_2_resistance_price']:.2f}" if item["target_2_resistance_price"] is not None else "") + " | book 30%",
+                f"T3: Rs {item['target_3']:.2f} | {item['target_3_source']}" +
+                    (f" at Rs {item['target_3_resistance_price']:.2f}" if item["target_3_resistance_price"] is not None else "") + " | book final 20%",
+                f"T1 Risk:Reward: 1:{item['risk_reward_to_t1']:.2f} | {item['rr_assessment']}",
                 "After T1: keep remaining-position SL below support; no automatic breakeven move.",
                 f"RSI: {item['rsi']:.1f} | ADX: {item['adx']:.1f} | Volume: {item['volume_ratio']:.1f}x",
                 "",
