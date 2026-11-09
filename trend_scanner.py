@@ -135,7 +135,7 @@ def make_period_bars(daily_frame, rule, now, timeframe):
         ]
     elif timeframe == "WEEKLY":
         # Include this week's candle only after Friday's NSE session has closed.
-        week_is_closed = now.weekday() == 4 and (now.hour > 15 or (now.hour == 15 and now.minute >= 30))
+        week_is_closed = now.weekday() > 4 or (now.weekday() == 4 and (now.hour > 15 or (now.hour == 15 and now.minute >= 30)))
         current_week = now.isocalendar()[:2]
         week_keys = local_period_dates.apply(lambda d: (d.isocalendar().year, d.isocalendar().week))
         if not week_is_closed:
