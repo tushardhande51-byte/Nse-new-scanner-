@@ -289,7 +289,7 @@ def get_timeframe_results(symbol, daily_frame):
         weekly = long_daily.set_index("date").resample("W-FRI").agg({
             "high": "max", "low": "min", "close": "last", "volume": "sum"
         }).dropna().reset_index()
-        monthly = long_daily.set_index("date").resample("M").agg({
+        monthly = long_daily.set_index("date").resample("ME").agg({
             "high": "max", "low": "min", "close": "last", "volume": "sum"
         }).dropna().reset_index()
         results["WEEKLY"] = timeframe_passes(weekly)
