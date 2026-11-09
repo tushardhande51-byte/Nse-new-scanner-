@@ -223,87 +223,6 @@ def support_resistance_levels(frame, entry):
             stoploss_risk_pct, support_sl_buffer_pct)
 
 
-def fetch_interval_history(symbol, period, interval, min_rows=60):
-    """Fetch secondary timeframe candles from Yahoo; no broker/API key required."""
-    url = YAHOO_CHART.format(requests.utils.quote(symbol, safe=""))
-    params = {"range": period, "interval": interval, "events": "history"}
-    for attempt in range(3):
-        try:
-            response = requests.get(url, params=params, headers=HEADERS, timeout=TIMEOUT)
-            if response.status_code == 429:
-                time.sleep(2 ** (attempt + 1))
-                continue
-            response.raise_for_status()
-            payload = response.json().get("chart", {})
-            if payload.get("error") or not payload.get("result"):
-                return None
-            result = payload["result"][0]
-            quote = result["indicators"]["quote"][0]
-            frame = pd.DataFrame({
-                "date": pd.to_datetime(result["timestamp"], unit="s", utc=True),
-                "high": quote.get("high"),
-                "low": quote.get("low"),
-                "close": quote.get("close"),
-                "volume": quote.get("volume"),
-            }).dropna()
-            frame = frame.sort_values("date").reset_index(drop=True)
-            return frame if len(frame) >= min_rows else None
-        except Exception:
-            if attempt < 2:
-                time.sleep(1 + attempt)
-    return None
-
-
-def timeframe_passes(frame):
-    """Apply the exact same six technical rules independently to a timeframe."""
-    if frame is None or len(frame) < 60:
-        return False
-    close = frame["close"]
-    ema20 = close.ewm(span=20, adjust=False).mean()
-    ema50 = close.ewm(span=50, adjust=False).mean()
-    rsi_value = rsi(close).iloc[-1]
-    avg_volume = frame["volume"].rolling(20).mean().iloc[-1]
-    prior_high = frame["high"].shift(1).rolling(20).max().iloc[-1]
-    adx_value = adx(frame).iloc[-1]
-    row = frame.iloc[-1]
-    values = [ema20.iloc[-1], ema50.iloc[-1], rsi_value, avg_volume, prior_high, adx_value]
-    if any(pd.isna(value) for value in values) or avg_volume <= 0:
-        return False
-    checks = [
-        row["close"] > ema20.iloc[-1],
-        ema20.iloc[-1] > ema50.iloc[-1],
-        RSI_MIN <= rsi_value <= RSI_MAX,
-        row["volume"] > avg_volume * VOLUME_MULTIPLIER,
-        row["close"] > prior_high,
-        adx_value > ADX_MIN,
-    ]
-    return all(bool(value) for value in checks)
-
-
-def get_timeframe_results(symbol, daily_frame):
-    """Secondary checks run only after the stock has passed the main Daily 6/6 scan."""
-    results = {"DAILY": True}
-    # Five years of daily candles are resampled to provide enough monthly/weekly bars.
-    long_daily = fetch_interval_history(symbol, "5y", "1d", min_rows=260)
-    if long_daily is not None:
-        weekly = long_daily.set_index("date").resample("W-FRI").agg({
-            "high": "max", "low": "min", "close": "last", "volume": "sum"
-        }).dropna().reset_index()
-        monthly = long_daily.set_index("date").resample("ME").agg({
-            "high": "max", "low": "min", "close": "last", "volume": "sum"
-        }).dropna().reset_index()
-        results["WEEKLY"] = timeframe_passes(weekly)
-        results["MONTHLY"] = timeframe_passes(monthly)
-    else:
-        results["WEEKLY"] = None
-        results["MONTHLY"] = None
-
-    hourly = fetch_interval_history(symbol, "730d", "60m", min_rows=60)
-    fifteen = fetch_interval_history(symbol, "60d", "15m", min_rows=60)
-    results["1 HOUR"] = timeframe_passes(hourly) if hourly is not None else None
-    results["15 MIN"] = timeframe_passes(fifteen) if fifteen is not None else None
-    return results
-
 def evaluate(symbol, company):
     frame = fetch_history(symbol)
     if frame is None or len(frame) < MIN_ROWS:
@@ -338,12 +257,6 @@ def evaluate(symbol, company):
      resistance_gap_pct, resistance_warning, stoploss_risk_pct,
      support_sl_buffer_pct) = levels
     volume_ratio = float(row.volume / row.avg_volume20)
-    timeframe_results = get_timeframe_results(symbol, frame)
-    timeframe_passed = [name for name, passed in timeframe_results.items() if passed is True]
-    timeframe_status = " | ".join(
-        f"{name}: " + ("PASS" if passed is True else "FAIL" if passed is False else "DATA NOT AVAILABLE")
-        for name, passed in timeframe_results.items()
-    )
     if volume_ratio >= UNUSUAL_VOLUME_RATIO:
         volume_warning = "UNUSUAL VOLUME - verify news / bulk or block deal"
     elif volume_ratio >= HIGH_VOLUME_RATIO:
@@ -404,10 +317,6 @@ def evaluate(symbol, company):
         "booking_plan": "50%-30%-20%",
         "stoploss_after_t1": "Keep below support",
         "filters_passed": "6/6",
-        "timeframe_results": timeframe_results,
-        "timeframes_passed": ", ".join(timeframe_passed),
-        "timeframes_passed_count": len(timeframe_passed),
-        "timeframe_status": timeframe_status,
     }
 
 
@@ -511,19 +420,11 @@ def main():
         lines.append("No stock passed the strict 6/6 technical filters. Support/targets and R:R do not reject 6/6 matches.")
     else:
         lines.append(f"Actionable matches: {len(matches)}")
-        lines.append("Multi-timeframe rule: the same six technical conditions are checked separately on each timeframe; this does not change the main Daily 6/6 selection.")
-        for timeframe in ["MONTHLY", "WEEKLY", "DAILY", "1 HOUR", "15 MIN"]:
-            passed_count = sum(1 for item in matches if item["timeframe_results"].get(timeframe) is True)
-            unavailable_count = sum(1 for item in matches if item["timeframe_results"].get(timeframe) is None)
-            lines.append(f"{timeframe}: {passed_count}/{len(matches)} passed | data unavailable: {unavailable_count}")
-        lines.append("")
         for item in matches[:20]:
             lines.extend([
                 f"{item['symbol']} - {item['company']}",
                 f"{item['trade_quality_emoji']} TRADE QUALITY: {item['trade_quality']}",
                 f"Daily technical filters: {item['filters_passed']}",
-                f"Timeframes passed ({item['timeframes_passed_count']}/5): {item['timeframes_passed'] or 'None'}",
-                f"Timeframe details: {item['timeframe_status']}",
                 f"Entry: Rs {item['entry']:.2f}",
                 f"Support: Rs {item['support']:.2f} ({item['support_source']}) | Stop-loss: Rs {item['stoploss']:.2f}",
                 f"Risk to SL: {item['stoploss_risk_pct_from_entry']:.2f}% of entry | Support-to-SL buffer: {item['support_to_stoploss_buffer_pct']:.2f}%",
