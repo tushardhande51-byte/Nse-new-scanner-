@@ -289,7 +289,10 @@ def main():
         "Stocks (first 50): " + (", ".join(all_up[:50]) if all_up else "None"),
         f"ALL 4 TIMEFRAMES DOWNTREND: {len(all_down)}",
         "Stocks (first 50): " + (", ".join(all_down[:50]) if all_down else "None"),
-        f"MIXED / SIDEWAYS: {len(mixed)} | INCOMPLETE DATA: {len(incomplete)}",
+        f"MIXED / SIDEWAYS: {len(mixed)}",
+        "Mixed / Sideways stocks (first 50): " + (", ".join(mixed[:50]) if mixed else "None"),
+        f"INCOMPLETE DATA: {len(incomplete)}",
+        "Incomplete-data stocks (first 30): " + (", ".join(incomplete[:30]) if incomplete else "None"),
         "",
     ]
     for timeframe in ["MONTHLY", "WEEKLY", "DAILY", "1 HOUR"]:
