@@ -89,148 +89,97 @@ def fetch_chart(symbol, period, interval, min_rows=50):
     return None
 
 
-def classify_trend(frame):
-    """EMA trend: UP = Close > EMA20 > EMA50; DOWN = Close < EMA20 < EMA50."""
-    if frame is None or len(frame) < 55:
+def classify_close_direction(frame):
+    """Compare only the last two fully closed candles by CLOSE; no EMA is used."""
+    if frame is None or len(frame) < 2:
         return "DATA NOT AVAILABLE"
-    close = frame["close"]
-    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
-    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
-    last_close = close.iloc[-1]
-    if pd.isna(ema20) or pd.isna(ema50) or pd.isna(last_close):
+    closes = pd.to_numeric(frame["close"], errors="coerce").dropna()
+    if len(closes) < 2:
         return "DATA NOT AVAILABLE"
-    if last_close > ema20 > ema50:
+    previous_close = float(closes.iloc[-2])
+    latest_close = float(closes.iloc[-1])
+    if latest_close > previous_close:
         return "UPTREND"
-    if last_close < ema20 < ema50:
+    if latest_close < previous_close:
         return "DOWNTREND"
     return "SIDEWAYS"
 
 
+def keep_only_closed_daily_bars(frame, now):
+    """Daily Yahoo bars are dated by session; today's bar is usable only after NSE close."""
+    if frame is None or frame.empty:
+        return frame
+    local_dates = frame["date"].dt.tz_convert("Asia/Kolkata").dt.date
+    today = now.date()
+    include_today = now.hour > 15 or (now.hour == 15 and now.minute >= 30)
+    mask = (local_dates < today) | ((local_dates == today) & include_today)
+    return frame.loc[mask].copy().reset_index(drop=True)
+
+
+def make_period_bars(daily_frame, rule, now, timeframe):
+    if daily_frame is None or daily_frame.empty:
+        return None
+    indexed = daily_frame.set_index("date")
+    bars = indexed.resample(rule).agg({
+        "high": "max", "low": "min", "close": "last", "volume": "sum"
+    }).dropna().reset_index()
+    if bars.empty:
+        return bars
+
+    local_period_dates = bars["date"].dt.tz_convert("Asia/Kolkata")
+    if timeframe == "MONTHLY":
+        # The current calendar month is never treated as a completed monthly candle.
+        bars = bars.loc[
+            (local_period_dates.dt.year < now.year)
+            | ((local_period_dates.dt.year == now.year) & (local_period_dates.dt.month < now.month))
+        ]
+    elif timeframe == "WEEKLY":
+        # Include this week's candle only after Friday's NSE session has closed.
+        week_is_closed = now.weekday() == 4 and (now.hour > 15 or (now.hour == 15 and now.minute >= 30))
+        current_week = now.isocalendar()[:2]
+        week_keys = local_period_dates.apply(lambda d: (d.isocalendar().year, d.isocalendar().week))
+        if not week_is_closed:
+            bars = bars.loc[week_keys != current_week]
+    return bars.reset_index(drop=True)
+
+
+def keep_only_closed_hourly_bars(frame, now):
+    """Keep only completed 60-minute bars, including NSE's final 15:15-15:30 bar."""
+    if frame is None or frame.empty:
+        return frame
+    local_starts = frame["date"].dt.tz_convert("Asia/Kolkata")
+    completed = (local_starts + pd.Timedelta(hours=1)) <= now
+    final_nse_bar = (
+        (local_starts.dt.hour == 15) & (local_starts.dt.minute == 15)
+        & (now.hour > 15 or (now.hour == 15 and now.minute >= 30))
+    )
+    return frame.loc[completed | final_nse_bar].copy().reset_index(drop=True)
+
+
 def scan_symbol(item):
     symbol, company = item
-    daily_history = fetch_chart(symbol, "5y", "1d", min_rows=100)
-    if daily_history is None:
+    now = now_ist()
+    daily_raw = fetch_chart(symbol, "5y", "1d", min_rows=20)
+    if daily_raw is None:
         return {
             "symbol": symbol, "company": company,
             "MONTHLY": "DATA NOT AVAILABLE", "WEEKLY": "DATA NOT AVAILABLE",
             "DAILY": "DATA NOT AVAILABLE", "1 HOUR": "DATA NOT AVAILABLE",
         }
-    indexed = daily_history.set_index("date")
-    weekly = indexed.resample("W-FRI").agg({
-        "high": "max", "low": "min", "close": "last", "volume": "sum"
-    }).dropna().reset_index()
-    monthly = indexed.resample("ME").agg({
-        "high": "max", "low": "min", "close": "last", "volume": "sum"
-    }).dropna().reset_index()
-    hourly = fetch_chart(symbol, "730d", "60m", min_rows=55)
+
+    daily_closed = keep_only_closed_daily_bars(daily_raw, now)
+    weekly_closed = make_period_bars(daily_closed, "W-FRI", now, "WEEKLY")
+    monthly_closed = make_period_bars(daily_closed, "ME", now, "MONTHLY")
+
+    hourly_raw = fetch_chart(symbol, "730d", "60m", min_rows=2)
+    hourly_closed = keep_only_closed_hourly_bars(hourly_raw, now)
+
     return {
         "symbol": symbol,
         "company": company,
-        "MONTHLY": classify_trend(monthly),
-        "WEEKLY": classify_trend(weekly),
-        "DAILY": classify_trend(daily_history),
-        "1 HOUR": classify_trend(hourly),
+        "MONTHLY": classify_close_direction(monthly_closed),
+        "WEEKLY": classify_close_direction(weekly_closed),
+        "DAILY": classify_close_direction(daily_closed),
+        "1 HOUR": classify_close_direction(hourly_closed),
     }
 
-
-def split_telegram_message(message, max_length=3500):
-    chunks, current = [], ""
-    for line in message.splitlines():
-        while len(line) > max_length:
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.append(line[:max_length])
-            line = line[max_length:]
-        candidate = line if not current else current + "\n" + line
-        if len(candidate) > max_length:
-            if current:
-                chunks.append(current)
-            current = line
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks or [""]
-
-
-def send_telegram(message):
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        print("Telegram not sent: bot token/chat ID secret missing.")
-        return False
-    chunks = split_telegram_message(message)
-    for index, chunk in enumerate(chunks, 1):
-        text_to_send = f"[Part {index}/{len(chunks)}]\n{chunk}" if len(chunks) > 1 else chunk
-        try:
-            response = requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": text_to_send, "disable_web_page_preview": True},
-                timeout=TIMEOUT,
-            )
-            if not response.ok or not response.json().get("ok"):
-                print(f"Telegram error part {index}/{len(chunks)}: HTTP {response.status_code} {response.text[:400]}")
-                return False
-            print(f"Telegram part delivered: {index}/{len(chunks)}")
-        except Exception as exc:
-            print(f"Telegram delivery failed: {exc}")
-            return False
-        if index < len(chunks):
-            time.sleep(1)
-    return True
-
-
-def main():
-    started = now_ist()
-    print(f"NSE MULTI-TIMEFRAME TREND SCANNER | {started:%Y-%m-%d %H:%M:%S %Z}")
-    print("Trend rule: UP = Close > EMA20 > EMA50; DOWN = Close < EMA20 < EMA50; otherwise SIDEWAYS.")
-    print("Timeframes: Monthly, Weekly, Daily, 1 Hour. This scanner is separate from the Daily 6/6 swing scanner.")
-    universe = get_nse_universe()
-    print(f"NSE EQ symbols downloaded: {len(universe)}")
-    results, errors = [], 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {pool.submit(scan_symbol, item): item[0] for item in universe}
-        for count, future in enumerate(as_completed(futures), 1):
-            symbol = futures[future]
-            try:
-                result = future.result()
-                results.append(result)
-            except Exception as exc:
-                errors += 1
-                print(f"ERROR {symbol}: {exc}")
-            if count % 100 == 0:
-                print(f"Progress: {count}/{len(universe)} | scanned={len(results)} | errors={errors}")
-    results.sort(key=lambda x: x["symbol"])
-    output = pd.DataFrame(results)
-    output.to_csv("nse_timeframe_trends.csv", index=False)
-
-    lines = [
-        "NSE MULTI-TIMEFRAME TREND REPORT",
-        f"Date: {now_ist():%d-%m-%Y %H:%M IST}",
-        f"Universe: {len(universe)} NSE EQ symbols | scanned rows: {len(results)} | errors: {errors}",
-        "Trend definition: UPTREND = Close > EMA20 > EMA50; DOWNTREND = Close < EMA20 < EMA50; otherwise SIDEWAYS.",
-        "Note: current latest candle is used; trend can change as candles update.",
-        "Full stock-wise report: download nse_timeframe_trends.csv from the GitHub Actions artifact.",
-        "",
-    ]
-    for timeframe in ["MONTHLY", "WEEKLY", "DAILY", "1 HOUR"]:
-        up = [x["symbol"] for x in results if x.get(timeframe) == "UPTREND"]
-        down = [x["symbol"] for x in results if x.get(timeframe) == "DOWNTREND"]
-        side = [x["symbol"] for x in results if x.get(timeframe) == "SIDEWAYS"]
-        missing = sum(1 for x in results if x.get(timeframe) == "DATA NOT AVAILABLE")
-        lines.extend([
-            f"{timeframe}: UP {len(up)} | DOWN {len(down)} | SIDEWAYS {len(side)} | DATA N/A {missing}",
-            "UPTREND stocks (first 30): " + (", ".join(up[:30]) if up else "None"),
-            "DOWNTREND stocks (first 30): " + (", ".join(down[:30]) if down else "None"),
-            "",
-        ])
-    message = "\n".join(lines)
-    print(message)
-    delivered = send_telegram(message)
-    print(f"Telegram delivered: {delivered}")
-    print(f"Finished: {now_ist():%Y-%m-%d %H:%M:%S %Z}; errors={errors}; rows={len(results)}")
-
-
-if __name__ == "__main__":
-    main()
