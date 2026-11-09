@@ -23,7 +23,6 @@ RSI_MIN, RSI_MAX = 55, 70
 ADX_MIN = 20
 LEVEL_LOOKBACK = 120
 PIVOT_WIDTH = 3
-MIN_RISK_REWARD = 1.5
 LEVEL_BUFFER_PCT = 0.005
 
 HEADERS = {
@@ -278,7 +277,7 @@ def main():
     started = now_ist()
     print(f"NSE EOD TECHNICAL SCANNER | {started:%Y-%m-%d %H:%M:%S %Z}")
     print("No broker connection or order placement.")
-    print("Three targets use distinct confirmed pivot resistances; booking plan 50%-30%-20%; stop remains below support after T1.")
+    print("Every strict 6/6 match is retained; pivot levels are used where available and ATR/R-multiple fallbacks complete SL/targets; R:R never rejects a match.")
     universe = get_nse_universe()
     print(f"NSE EQ symbols downloaded: {len(universe)}")
 
