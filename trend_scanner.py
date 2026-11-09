@@ -272,40 +272,29 @@ def main():
 
     all_up = [x["symbol"] for x in results if x.get("ALIGNMENT") == "4/4 UPTREND"]
     all_down = [x["symbol"] for x in results if x.get("ALIGNMENT") == "4/4 DOWNTREND"]
-    mixed = [x["symbol"] for x in results if x.get("ALIGNMENT") == "MIXED / SIDEWAYS"]
-    incomplete = [x["symbol"] for x in results if x.get("ALIGNMENT") == "INCOMPLETE DATA"]
+
+    # Final scanner output contains only stocks aligned in the same direction
+    # across Monthly, Weekly, Daily and 1 Hour. Mixed/sideways/incomplete are excluded.
+    aligned = [x for x in results if x.get("ALIGNMENT") in ("4/4 UPTREND", "4/4 DOWNTREND")]
+    pd.DataFrame(
+        aligned,
+        columns=["symbol", "company", "MONTHLY", "WEEKLY", "DAILY", "1 HOUR", "ALIGNMENT"],
+    ).to_csv("nse_timeframe_trends.csv", index=False)
 
     lines = [
         "NSE MULTI-TIMEFRAME TREND REPORT",
         f"Date: {now_ist():%d-%m-%Y %H:%M IST}",
         f"Universe: {len(universe)} NSE EQ symbols | scanned rows: {len(results)} | errors: {errors}",
-        "Trend definition: compare the last two fully closed candle CLOSE values only; higher = UPTREND, lower = DOWNTREND, equal = SIDEWAYS. No EMA.",
-        "Only completed candles are used; unfinished current candles are excluded.",
-        "Each stock is shown once with MONTHLY | WEEKLY | DAILY | 1 HOUR status in the CSV.",
-        "4/4 UPTREND means the stock is UP in all four timeframes; 4/4 DOWNTREND means DOWN in all four.",
-        "Full stock-wise matrix: download nse_timeframe_trends.csv from the GitHub Actions artifact.",
+        "Rule: only last two fully closed candle CLOSE values are compared; no EMA and no unfinished candles.",
+        "Only stocks with all FOUR timeframes agreeing are shown. Mixed, sideways and incomplete-data stocks are excluded.",
+        f"4/4 UPTREND (Monthly + Weekly + Daily + 1 Hour): {len(all_up)}",
+        "Stocks: " + (", ".join(all_up) if all_up else "None"),
         "",
-        f"ALL 4 TIMEFRAMES UPTREND: {len(all_up)}",
-        "Stocks (first 50): " + (", ".join(all_up[:50]) if all_up else "None"),
-        f"ALL 4 TIMEFRAMES DOWNTREND: {len(all_down)}",
-        "Stocks (first 50): " + (", ".join(all_down[:50]) if all_down else "None"),
-        f"MIXED / SIDEWAYS: {len(mixed)}",
-        "Mixed / Sideways stocks (first 50): " + (", ".join(mixed[:50]) if mixed else "None"),
-        f"INCOMPLETE DATA: {len(incomplete)}",
-        "Incomplete-data stocks (first 30): " + (", ".join(incomplete[:30]) if incomplete else "None"),
+        f"4/4 DOWNTREND (Monthly + Weekly + Daily + 1 Hour): {len(all_down)}",
+        "Stocks: " + (", ".join(all_down) if all_down else "None"),
         "",
+        "CSV artifact contains only these 4/4 aligned UPTREND and DOWNTREND stocks.",
     ]
-    for timeframe in ["MONTHLY", "WEEKLY", "DAILY", "1 HOUR"]:
-        up = [x["symbol"] for x in results if x.get(timeframe) == "UPTREND"]
-        down = [x["symbol"] for x in results if x.get(timeframe) == "DOWNTREND"]
-        side = [x["symbol"] for x in results if x.get(timeframe) == "SIDEWAYS"]
-        missing = sum(1 for x in results if x.get(timeframe) == "DATA NOT AVAILABLE")
-        lines.extend([
-            f"{timeframe}: UP {len(up)} | DOWN {len(down)} | SIDEWAYS {len(side)} | DATA N/A {missing}",
-            "UPTREND stocks (first 30): " + (", ".join(up[:30]) if up else "None"),
-            "DOWNTREND stocks (first 30): " + (", ".join(down[:30]) if down else "None"),
-            "",
-        ])
     message = "\n".join(lines)
     print(message)
     delivered = send_telegram(message)
