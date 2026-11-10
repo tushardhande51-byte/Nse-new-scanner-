@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       stocks:
-        description: "NSE symbols/company names separated by commas (max 30)"
+        description: "NSE symbols/company names separated by commas, semicolons, or new lines (max 100)"
         required: true
         type: string
 
