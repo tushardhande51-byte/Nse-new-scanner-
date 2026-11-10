@@ -31,9 +31,9 @@ def vals(df, patterns):
     return []
 
 def cagr(v):
-    # Screener annual P&L columns are newest-first. Compare latest year with 3 years earlier.
-    if len(v) < 4 or v[0] <= 0 or v[3] <= 0: return None
-    return ((v[0] / v[3]) ** (1/3) - 1) * 100
+    # Screener annual P&L columns run oldest-to-newest.
+    if len(v) < 4 or v[-1] <= 0 or v[-4] <= 0: return None
+    return ((v[-1] / v[-4]) ** (1/3) - 1) * 100
 
 def ratio(soup, labels):
     for li in soup.select("#top-ratios li"):
@@ -41,7 +41,7 @@ def ratio(soup, labels):
         if n and v and any(x in n.get_text(" ", strip=True).lower() for x in labels):
             return num(v.get_text(" ", strip=True))
     v = vals(table(soup, "ratios"), [re.escape(x) for x in labels])
-    return v[0] if v else None
+    return v[-1] if v else None
 
 def company(query):
     r = session.get(BASE + "/api/company/search/", params={"q": query}, timeout=30)
@@ -66,18 +66,22 @@ def company(query):
         debt, equity = vals(bs,[r"^borrowings$"]), vals(bs,[r"^total equity$"])
         if debt and equity and equity[-1] > 0: de = debt[0]/equity[0]
     opmv = vals(pl,[r"^opm"])
-    opm = opmv[0] if opmv else None
+    opm = opmv[-1] if opmv else None
 
-    cfo = vals(cf,[r"cash from operating activit"])
-    capex = vals(cf,[r"fixed assets purchased",r"purchase of fixed assets",r"capital expenditure"])
-    fcf = None
-    if cfo and capex:
-        n = min(3,len(cfo),len(capex))
-        fcf = all(cfo[i]-abs(capex[i]) > 0 for i in range(n))
+    fcf_values = vals(cf,[r"^free cash flow$"])
+    if fcf_values:
+        fcf = len(fcf_values) >= 3 and all(v > 0 for v in fcf_values[-3:])
+    else:
+        cfo = vals(cf,[r"cash from operating activit"])
+        capex = vals(cf,[r"fixed assets purchased",r"purchase of fixed assets",r"capital expenditure"])
+        fcf = None
+        if cfo and capex:
+            n = min(3,len(cfo),len(capex))
+            fcf = all(cfo[-i] - abs(capex[-i]) > 0 for i in range(1,n+1))
 
     promoter_vals, pledge_vals = vals(sh,[r"^promoters?$"]), vals(sh,[r"pledged"])
-    promoter = promoter_vals[0] if promoter_vals else None
-    pledged = pledge_vals[0] if pledge_vals else None
+    promoter = promoter_vals[-1] if promoter_vals else None
+    pledged = pledge_vals[-1] if pledge_vals else None
     pe = ratio(soup,["stock p/e","price to earning","p/e"])
     industry_pe = None
     if peers is not None and not peers.empty:
