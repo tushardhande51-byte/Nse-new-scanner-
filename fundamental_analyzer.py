@@ -31,7 +31,7 @@ def vals(df, patterns):
 
 def cagr(v):
     if len(v) < 4 or v[-4] <= 0 or v[-1] <= 0: return None
-    return ((v[-1] / v[-4]) ** (1/3) - 1) * 100
+    return ((v[0] / v[3]) ** (1/3) - 1) * 100
 
 def ratio(soup, labels):
     for li in soup.select("#top-ratios li"):
@@ -39,7 +39,7 @@ def ratio(soup, labels):
         if n and v and any(x in n.get_text(" ", strip=True).lower() for x in labels):
             return num(v.get_text(" ", strip=True))
     v = vals(table(soup, "ratios"), [re.escape(x) for x in labels])
-    return v[-1] if v else None
+    return v[0] if v else None
 
 def company(query):
     r = session.get(BASE + "/api/company/search/", params={"q": query}, timeout=30)
@@ -62,9 +62,9 @@ def company(query):
     de = ratio(soup,["debt to equity","debt/equity"])
     if de is None:
         debt, equity = vals(bs,[r"^borrowings$"]), vals(bs,[r"^total equity$"])
-        if debt and equity and equity[-1] > 0: de = debt[-1]/equity[-1]
+        if debt and equity and equity[-1] > 0: de = debt[0]/equity[0]
     opmv = vals(pl,[r"^opm"])
-    opm = opmv[-1] if opmv else None
+    opm = opmv[0] if opmv else None
 
     cfo = vals(cf,[r"cash from operating activit"])
     capex = vals(cf,[r"fixed assets purchased",r"purchase of fixed assets",r"capital expenditure"])
@@ -74,14 +74,14 @@ def company(query):
         fcf = all(cfo[-i]-abs(capex[-i]) > 0 for i in range(1,n+1))
 
     promoter_vals, pledge_vals = vals(sh,[r"^promoters?$"]), vals(sh,[r"pledged"])
-    promoter = promoter_vals[-1] if promoter_vals else None
-    pledged = pledge_vals[-1] if pledge_vals else None
+    promoter = promoter_vals[0] if promoter_vals else None
+    pledged = pledge_vals[0] if pledge_vals else None
     pe = ratio(soup,["stock p/e","price to earning","p/e"])
     industry_pe = None
     if peers is not None and not peers.empty:
         ix = next((i for i,c in enumerate(peers.columns) if "p/e" in str(c).lower()),None)
         if ix is not None:
-            pv = [num(x) for x in peers.iloc[:,ix].tolist()[1:]]
+            pv = [num(x) for x in peers.iloc[:,ix].tolist()]
             pv = [x for x in pv if x is not None and x > 0]
             if pv: industry_pe = sum(pv)/len(pv)
     peg = pe/eps if pe is not None and eps is not None and eps > 0 else None
@@ -150,7 +150,7 @@ def main():
     if errors: lines += ["NOT ANALYSED:"]+[f"{s}: {e}" for s,e in errors]
     lines += ["NA metrics are not counted as passed. PEG is an estimate, not a published Screener PEG.",
               "Fundamental quality does not guarantee intraday liquidity, volatility, or profit."]
-    report="\\n".join(lines)
+    report="\n".join(lines)
     print(report)
     open("fundamental_top5_report.txt","w",encoding="utf-8").write(report)
     pd.DataFrame([{"Rank":i+1,"Symbol":x["symbol"],"Company":x["company"],"Score":x["score"],
