@@ -26,7 +26,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python fundamental_analyzer.py --stocks "\${{ github.event.inputs.stocks }}"
+        run: python fundamental_analyzer.py --stocks "${{ github.event.inputs.stocks }}"
       - name: Upload Top 5 report
         uses: actions/upload-artifact@v4
         with:
