@@ -59,9 +59,9 @@ def row_values(df, patterns):
         label = str(row.iloc[0]).strip().lower()
         # Screener appends "+" to expandable rows (e.g. "Borrowings +" and
         # "Promoters +"). Normalize these labels before matching.
-        label = label.replace("\\xa0", " ")
-        label = re.sub(r"\\s*\\+\\s*$", "", label)
-        label = re.sub(r"\\s+", " ", label).strip()
+        label = label.replace("\xa0", " ")
+        label = re.sub(r"\s*\+\s*$", "", label)
+        label = re.sub(r"\s+", " ", label).strip()
         if any(re.search(pattern, label) for pattern in patterns):
             return [num(value) for value in row.iloc[1:].tolist()]
     return []
