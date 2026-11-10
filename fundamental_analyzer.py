@@ -1,4 +1,5 @@
 import argparse, io, re, time
+import os
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -153,6 +154,25 @@ def main():
     report="\n".join(lines)
     print(report)
     open("fundamental_top5_report.txt","w",encoding="utf-8").write(report)
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        print("Telegram not sent: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID GitHub secrets are missing.")
+    else:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": report[:3900], "disable_web_page_preview": True},
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("ok"):
+                raise RuntimeError(str(payload))
+            print("Telegram delivered successfully.")
+        except Exception as exc:
+            print(f"Telegram delivery failed: {exc}")
+            raise
     pd.DataFrame([{"Rank":i+1,"Symbol":x["symbol"],"Company":x["company"],"Score":x["score"],
        "Passed":x["passed"],"DataAvailable":x["known"],**x["metrics"],"PE":x["pe"],
        "IndustryPE":x["industry_pe"],"EstimatedPEG":x["peg"],"ScreenerURL":x["url"]}
