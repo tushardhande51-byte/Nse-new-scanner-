@@ -124,7 +124,7 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--stocks",required=True)
     args=ap.parse_args()
-    stocks=list(dict.fromkeys(x.strip() for x in re.split(r"[,;\\n]+",args.stocks) if x.strip()))
+    stocks=list(dict.fromkeys(x.strip() for x in re.split(r"[,;\n]+",args.stocks) if x.strip()))
     if len(stocks)>30: raise SystemExit("Maximum 30 companies per run.")
     out=[]; errors=[]
     print(f"FUNDAMENTAL-ONLY ANALYSIS | Input: {len(stocks)}")
