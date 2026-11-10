@@ -1,0 +1,34 @@
+name: NSE Fundamental Top 5 Analyzer
+
+on:
+  workflow_dispatch:
+    inputs:
+      stocks:
+        description: "NSE symbols/company names separated by commas (max 30)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pandas requests beautifulsoup4 lxml
+      - name: Fundamental-only analysis
+        run: python fundamental_analyzer.py --stocks "\${{ github.event.inputs.stocks }}"
+      - name: Upload Top 5 report
+        uses: actions/upload-artifact@v4
+        with:
+          name: fundamental-top5-report
+          path: |
+            fundamental_top5_report.txt
+            fundamental_top5.csv
+          retention-days: 14
