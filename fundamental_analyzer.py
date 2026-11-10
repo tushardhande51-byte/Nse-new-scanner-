@@ -31,7 +31,8 @@ def vals(df, patterns):
     return []
 
 def cagr(v):
-    if len(v) < 4 or v[-4] <= 0 or v[-1] <= 0: return None
+    # Screener annual P&L columns are newest-first. Compare latest year with 3 years earlier.
+    if len(v) < 4 or v[0] <= 0 or v[3] <= 0: return None
     return ((v[0] / v[3]) ** (1/3) - 1) * 100
 
 def ratio(soup, labels):
@@ -58,7 +59,7 @@ def company(query):
 
     pl, bs, cf = table(soup,"profit-loss"), table(soup,"balance-sheet"), table(soup,"cash-flow")
     sh, peers = table(soup,"shareholding"), table(soup,"peers")
-    sales, profit, eps = cagr(vals(pl,[r"^sales$"])), cagr(vals(pl,[r"^net profit$"])), cagr(vals(pl,[r"^eps$"]))
+    sales, profit, eps = cagr(vals(pl,[r"^sales(?:\s*\+)?$"])), cagr(vals(pl,[r"^net profit(?:\s*\+)?$"])), cagr(vals(pl,[r"^eps(?:\s+in\s+rs)?$"]))
     roce, roe = ratio(soup,["roce"]), ratio(soup,["roe"])
     de = ratio(soup,["debt to equity","debt/equity"])
     if de is None:
@@ -72,7 +73,7 @@ def company(query):
     fcf = None
     if cfo and capex:
         n = min(3,len(cfo),len(capex))
-        fcf = all(cfo[-i]-abs(capex[-i]) > 0 for i in range(1,n+1))
+        fcf = all(cfo[i]-abs(capex[i]) > 0 for i in range(n))
 
     promoter_vals, pledge_vals = vals(sh,[r"^promoters?$"]), vals(sh,[r"pledged"])
     promoter = promoter_vals[0] if promoter_vals else None
@@ -137,9 +138,12 @@ def main():
             errors.append((s,str(e))); print(f"ERROR {s}: {e}")
         time.sleep(0.7)
     out.sort(key=lambda x:(x["score"],x["known"],x["passed"]),reverse=True)
+    eligible = [x for x in out if x["known"] >= 8]
     lines=["TOP 5 FUNDAMENTAL STOCKS",f"Input: {len(stocks)} | Analysed: {len(out)} | Errors: {len(errors)}",
+           f"Eligible (at least 8/11 metrics available): {len(eligible)}",
            "Fundamental ranking only. No technical analysis or intraday signal.", ""]
-    for i,x in enumerate(out[:5],1):
+    eligible = [x for x in out if x["known"] >= 8]
+    for i,x in enumerate(eligible[:5],1):
         m=x["metrics"]
         lines += [f"{i}. {x['symbol']} - {x['company']}",
           f"Score {x['score']}/100 | Passed {x['passed']}/11 | Data {x['known']}/11",
@@ -148,6 +152,8 @@ def main():
           f"3Y FCF positive: {m['Positive 3Y FCF']} | Promoter {fmt(m['Promoter holding'],'%')} | Pledged {fmt(m['Pledged holding'],'%')}",
           f"P/E {fmt(x['pe'])} | Peer P/E {fmt(x['industry_pe'])} | Est. PEG {fmt(x['peg'])} | {x['valnote']}",
           "Checks: "+" | ".join(f"{k}: {v}" for k,v in x["detail"].items()),f"Source: {x['url']}",""]
+    if not eligible:
+        lines += ["NO RELIABLE TOP 5: fewer than 8/11 metrics were available for every analysed company. Do not use a low-coverage ranking."]
     if errors: lines += ["NOT ANALYSED:"]+[f"{s}: {e}" for s,e in errors]
     lines += ["NA metrics are not counted as passed. PEG is an estimate, not a published Screener PEG.",
               "Fundamental quality does not guarantee intraday liquidity, volatility, or profit."]
@@ -176,6 +182,6 @@ def main():
     pd.DataFrame([{"Rank":i+1,"Symbol":x["symbol"],"Company":x["company"],"Score":x["score"],
        "Passed":x["passed"],"DataAvailable":x["known"],**x["metrics"],"PE":x["pe"],
        "IndustryPE":x["industry_pe"],"EstimatedPEG":x["peg"],"ScreenerURL":x["url"]}
-       for i,x in enumerate(out[:5])]).to_csv("fundamental_top5.csv",index=False)
+       for i,x in enumerate(eligible[:5])]).to_csv("fundamental_top5.csv",index=False)
 
 if __name__=="__main__": main()
