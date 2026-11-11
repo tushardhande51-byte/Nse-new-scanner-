@@ -227,6 +227,68 @@ def confirm_opening_45m(row, now):
 
 
 
+def opening_volume_metrics(symbol, now, previous_close):
+    """Compare today's first 45m volume with the same 45m from the prior 20 sessions."""
+    frame = fetch_chart(symbol, "60d", "15m", min_rows=3)
+    if frame is None or frame.empty:
+        return None
+
+    local = frame.copy()
+    local["local_time"] = local["date"].dt.tz_convert("Asia/Kolkata")
+    local["session_date"] = local["local_time"].dt.date
+    local["clock"] = local["local_time"].dt.strftime("%H:%M")
+    expected = {"09:15", "09:30", "09:45"}
+    local = local[local["clock"].isin(expected)].copy()
+
+    def first_45m_volume(group):
+        by_clock = group.drop_duplicates("clock").set_index("clock")
+        if not expected.issubset(set(by_clock.index)):
+            return None
+        values = pd.to_numeric(by_clock.loc[["09:15", "09:30", "09:45"], "volume"], errors="coerce")
+        if values.isna().any():
+            return None
+        return float(values.sum())
+
+    today_rows = local[local["session_date"] == now.date()]
+    today_volume = first_45m_volume(today_rows)
+    if today_volume is None:
+        return None
+
+    historical = []
+    for session_date, group in local[local["session_date"] < now.date()].groupby("session_date"):
+        volume = first_45m_volume(group)
+        if volume is not None:
+            historical.append((session_date, volume))
+    historical.sort(key=lambda item: item[0], reverse=True)
+    historical = historical[:20]
+    if len(historical) < 20:
+        return None
+
+    average_volume = sum(value for _, value in historical) / len(historical)
+    if average_volume <= 0:
+        return None
+    latest_close_rows = today_rows[today_rows["clock"] == "09:45"]
+    if latest_close_rows.empty or previous_close is None or float(previous_close) <= 0:
+        return None
+    latest_close = float(latest_close_rows.iloc[-1]["close"])
+    change_pct = (latest_close / float(previous_close) - 1) * 100
+    relative_volume = today_volume / average_volume
+    volume_label = (
+        "STRONG" if relative_volume >= 1.5 else
+        "MODERATE" if relative_volume >= 1.2 else
+        "NORMAL"
+    )
+    return {
+        "OPENING_45M_VOLUME": int(today_volume),
+        "AVG_20D_SAME_TIME_VOLUME": round(average_volume, 1),
+        "RELATIVE_VOLUME_45M": round(relative_volume, 2),
+        "VOLUME_STRENGTH": volume_label,
+        "CHANGE_FROM_PREV_CLOSE_PCT": round(change_pct, 2),
+        "TREND_STRENGTH_PCT": round(abs(change_pct), 2),
+    }
+
+
+
 def split_telegram_message(message, max_length=3500):
     chunks, current = [], ""
     for line in message.splitlines():
@@ -327,14 +389,51 @@ def main():
                 if confirmation == expected_direction:
                     row["15M 45MIN"] = confirmation
                     row["ALIGNMENT"] = "5/5 UPTREND" if expected_direction == "UPTREND" else "5/5 DOWNTREND"
+                    volume_data = opening_volume_metrics(row["symbol"], now_ist(), row.get("PREVIOUS_DAY_CLOSE"))
+                    if volume_data is None:
+                        row["VOLUME_DATA_STATUS"] = "NOT AVAILABLE - 20 complete prior sessions required"
+                        row["RELATIVE_VOLUME_45M"] = None
+                        row["VOLUME_STRENGTH"] = "DATA NOT AVAILABLE"
+                        row["CHANGE_FROM_PREV_CLOSE_PCT"] = None
+                        row["TREND_STRENGTH_PCT"] = None
+                    else:
+                        row.update(volume_data)
+                        row["VOLUME_DATA_STATUS"] = "OK"
                     live_checked.append(row)
 
     all_up = [x["symbol"] for x in live_checked if x.get("ALIGNMENT") == "5/5 UPTREND"]
     all_down = [x["symbol"] for x in live_checked if x.get("ALIGNMENT") == "5/5 DOWNTREND"]
+    volume_ranked = sorted(
+        [x for x in live_checked if x.get("RELATIVE_VOLUME_45M") is not None],
+        key=lambda x: x["RELATIVE_VOLUME_45M"], reverse=True
+    )
+    trend_ranked = sorted(
+        [x for x in live_checked if x.get("TREND_STRENGTH_PCT") is not None],
+        key=lambda x: x["TREND_STRENGTH_PCT"], reverse=True
+    )
+    # Transparent screening score: 60% capped relative volume + 40% capped absolute move.
+    for item in live_checked:
+        rvol = item.get("RELATIVE_VOLUME_45M")
+        move = item.get("TREND_STRENGTH_PCT")
+        item["COMBINED_SCORE"] = (
+            round(60 * min(float(rvol), 5.0) / 5.0 + 40 * min(float(move), 5.0) / 5.0, 1)
+            if rvol is not None and move is not None else None
+        )
+    combined_ranked = sorted(
+        [x for x in live_checked if x.get("COMBINED_SCORE") is not None],
+        key=lambda x: x["COMBINED_SCORE"], reverse=True
+    )
     live_checked.sort(key=lambda x: x["symbol"])
     pd.DataFrame(
         live_checked,
-        columns=["symbol", "company", "MONTHLY", "WEEKLY", "DAILY", "1 HOUR", "15M 45MIN", "ALIGNMENT"],
+        columns=[
+            "symbol", "company", "MONTHLY", "WEEKLY", "DAILY", "1 HOUR",
+            "15M 45MIN", "ALIGNMENT", "PREVIOUS_DAY_CLOSE",
+            "OPENING_45M_VOLUME", "AVG_20D_SAME_TIME_VOLUME",
+            "RELATIVE_VOLUME_45M", "VOLUME_STRENGTH",
+            "CHANGE_FROM_PREV_CLOSE_PCT", "TREND_STRENGTH_PCT",
+            "VOLUME_DATA_STATUS",
+        ],
     ).to_csv("nse_timeframe_trends.csv", index=False)
 
     lines = [
@@ -350,7 +449,28 @@ def main():
         f"5/5 DOWNTREND: {len(all_down)}",
         "Stocks: " + (", ".join(all_down) if all_down else "None"),
         "",
-        "CSV artifact contains only stocks passing all five filters.",
+        "VOLUME TOP 10 (first 45m vs prior 20 sessions, same time):",
+        *([
+            f"{x['symbol']} | RVOL {x['RELATIVE_VOLUME_45M']:.2f}x | {x['VOLUME_STRENGTH']} | {x['ALIGNMENT']}"
+            for x in volume_ranked[:10]
+        ] or ["No eligible volume data"]),
+        "",
+        "TREND TOP 10 (absolute move from previous close at 10:00):",
+        *([
+            f"{x['symbol']} | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['ALIGNMENT']}"
+            for x in trend_ranked[:10]
+        ] or ["No eligible trend data"]),
+        "",
+        "BEST VOLUME + TREND TOP 5 (heuristic score /100; not a buy signal):",
+        *([
+            f"{x['symbol']} | Score {x['COMBINED_SCORE']:.1f}/100 | RVOL {x['RELATIVE_VOLUME_45M']:.2f}x | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['ALIGNMENT']}"
+            for x in combined_ranked[:5]
+        ] or ["No combined ranking available"]),
+        "",
+        "Volume strength: STRONG >=1.5x; MODERATE 1.2x-1.49x; NORMAL <1.2x.",
+        "Combined score = 60% relative-volume component (capped at 5x) + 40% absolute price-move component (capped at 5%). Heuristic only.",
+        "If same-time volume history is incomplete, stock remains in 5/5 report but is excluded from volume/combined ranking.",
+        "CSV artifact contains only stocks passing all five original filters, with added volume/trend fields.",
     ]
     message = "\n".join(lines)
     print(message)
