@@ -461,6 +461,18 @@ def main():
         [x for x in live_checked if x.get("COMBINED_SCORE") is not None],
         key=lambda x: x["COMBINED_SCORE"], reverse=True
     )
+
+    # Final report watchlist: strict 6/6, GREEN volume confirmation, and avoid
+    # chasing a stock already extended more than 10% from the previous close.
+    final_watchlist = [
+        x for x in combined_ranked
+        if x.get("STATUS", "").startswith("🟢 GREEN")
+        and x.get("TREND_STRENGTH_PCT") is not None
+        and x["TREND_STRENGTH_PCT"] <= 10.0
+    ][:5]
+    for rank, item in enumerate(final_watchlist, 1):
+        item["FINAL_WATCHLIST_RANK"] = rank
+
     live_checked.sort(key=lambda x: x["symbol"])
     pd.DataFrame(
         live_checked,
@@ -470,7 +482,7 @@ def main():
             "SESSION_VOLUME_TO_TIME", "AVG_20D_SAME_TIME_VOLUME",
             "RELATIVE_VOLUME_TO_TIME", "VOLUME_STRENGTH",
             "CHANGE_FROM_PREV_CLOSE_PCT", "TREND_STRENGTH_PCT", "COMBINED_SCORE",
-            "VOLUME_DATA_STATUS",
+            "FINAL_WATCHLIST_RANK", "VOLUME_DATA_STATUS",
         ],
     ).to_csv("nse_timeframe_trends.csv", index=False)
 
@@ -511,9 +523,16 @@ def main():
             for x in combined_ranked[:5]
         ] or ["No combined ranking available"]),
         "",
+        "🏆 TOP 5 FINAL WATCHLIST (strict 6/6 + GREEN RVOL >=1.5x + move <=10%; no chasing):",
+        *([
+            f"{rank}. {x['symbol']} | Score {x['COMBINED_SCORE']:.1f}/100 | RVOL {x['RELATIVE_VOLUME_TO_TIME']:.2f}x | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['ALIGNMENT']} | {x['STATUS']}"
+            for rank, x in enumerate(final_watchlist, 1)
+        ] or ["No stock met all final watchlist rules; no forced picks."]),
+        "",
         "🟢 GREEN = 6/6 alignment + same-time relative volume >=1.5x. 🟡 YELLOW = 6/6 alignment but volume below 1.5x or unavailable.",
         "🔴 RED / REJECT = not shown in candidate list because one or more required trend confirmations failed or data was unavailable.",
         "Volume strength: STRONG >=1.5x; MODERATE 1.2x-1.49x; NORMAL <1.2x.",
+        "Final watchlist rule: strict 6/6 alignment, GREEN same-time RVOL >=1.5x, absolute move from previous close <=10%, ranked by combined score; fewer than 5 are shown if fewer qualify.",
         "Combined score is a heuristic ranking only, not an entry signal. Entry still requires your 5-minute candle CLOSE above today's high and a planned stop-loss.",
         "If Yahoo intraday data is delayed/incomplete, the scanner can reject the symbol or show unavailable data; verify the candle timestamp before trading.",
         "CSV artifact contains only 6/6 candidates and their run-time volume/trend fields.",
