@@ -186,38 +186,46 @@ def scan_symbol(item):
     }
 
 
-def confirm_opening_45m(row, now):
-    """Confirm all three completed 15m candle CLOSES against the previous NSE session close."""
+def get_completed_today_15m(intraday, now):
+    """Return today's completed 15m candles only, through the latest expected closed slot."""
+    if intraday is None or intraday.empty:
+        return None
+    local = intraday.copy()
+    local["local_time"] = local["date"].dt.tz_convert("Asia/Kolkata")
+    local = local[local["local_time"].dt.date == now.date()].copy()
+    if local.empty:
+        return None
+    local["clock"] = local["local_time"].dt.strftime("%H:%M")
+    local = local[local["local_time"].dt.hour >= 9].copy()
+    # At 12:07, the latest fully completed 15m candle should start at 11:45.
+    latest_expected_start = now.replace(
+        minute=(now.minute // 15) * 15, second=0, microsecond=0
+    ) - pd.Timedelta(minutes=15)
+    local = local[local["local_time"] <= latest_expected_start].copy()
+    local = local.sort_values("local_time").drop_duplicates("clock", keep="last")
+    if local.empty:
+        return None
+    latest_start = local["local_time"].iloc[-1]
+    if latest_start < latest_expected_start:
+        return None
+    return local.reset_index(drop=True)
+
+
+def confirm_opening_45m(intraday, now, previous_close):
+    """Fixed 10:00 confirmation: 09:15, 09:30 and 09:45 completed closes vs prior close."""
     if now.hour < 10:
         return "NOT READY"
-    previous_close = row.get("PREVIOUS_DAY_CLOSE")
     if previous_close is None or pd.isna(previous_close):
         return "DATA NOT AVAILABLE"
-
-    intraday = fetch_chart(row["symbol"], "5d", "15m", min_rows=3)
-    if intraday is None or intraday.empty:
+    completed = get_completed_today_15m(intraday, now)
+    if completed is None:
         return "DATA NOT AVAILABLE"
-
-    local_starts = intraday["date"].dt.tz_convert("Asia/Kolkata")
-    today = local_starts.dt.date == now.date()
-    expected = [(9, 15), (9, 30), (9, 45)]
-    selected = intraday.loc[today].copy()
-    selected["_hour"] = local_starts.loc[today].dt.hour
-    selected["_minute"] = local_starts.loc[today].dt.minute
-    selected = selected.set_index(["_hour", "_minute"])
-
-    closes = []
-    for hour_minute in expected:
-        if hour_minute not in selected.index:
-            return "DATA NOT AVAILABLE"
-        candle = selected.loc[hour_minute]
-        if isinstance(candle, pd.DataFrame):
-            candle = candle.iloc[-1]
-        candle_start = now.replace(hour=hour_minute[0], minute=hour_minute[1], second=0, microsecond=0)
-        if candle_start + pd.Timedelta(minutes=15) > now:
-            return "NOT READY"
-        closes.append(float(candle["close"]))
-
+    opening = completed[completed["clock"].isin(["09:15", "09:30", "09:45"])]
+    by_clock = opening.drop_duplicates("clock").set_index("clock")
+    expected = ["09:15", "09:30", "09:45"]
+    if not all(clock in by_clock.index for clock in expected):
+        return "DATA NOT AVAILABLE"
+    closes = [float(by_clock.loc[clock, "close"]) for clock in expected]
     if all(value > float(previous_close) for value in closes):
         return "UPTREND"
     if all(value < float(previous_close) for value in closes):
@@ -225,40 +233,53 @@ def confirm_opening_45m(row, now):
     return "FAIL"
 
 
+def confirm_runtime_trend(intraday, now, previous_close):
+    """Run-time confirmation: every completed 15m close today must remain on the same side of prior close."""
+    if previous_close is None or pd.isna(previous_close):
+        return "DATA NOT AVAILABLE", None
+    completed = get_completed_today_15m(intraday, now)
+    if completed is None:
+        return "DATA NOT AVAILABLE", None
+    if len(completed) < 3:
+        return "NOT READY", None
+    closes = pd.to_numeric(completed["close"], errors="coerce").dropna()
+    if len(closes) != len(completed):
+        return "DATA NOT AVAILABLE", None
+    if (closes > float(previous_close)).all():
+        return "UPTREND", completed["local_time"].iloc[-1].strftime("%H:%M")
+    if (closes < float(previous_close)).all():
+        return "DOWNTREND", completed["local_time"].iloc[-1].strftime("%H:%M")
+    return "FAIL", completed["local_time"].iloc[-1].strftime("%H:%M")
 
 
-def opening_volume_metrics(symbol, now, previous_close):
-    """Compare today's first 45m volume with the same 45m from the prior 20 sessions."""
-    frame = fetch_chart(symbol, "60d", "15m", min_rows=3)
-    if frame is None or frame.empty:
+def time_matched_volume_metrics(intraday, now, previous_close):
+    """Compare today's cumulative completed-15m volume with the same clock slots over prior 20 sessions."""
+    completed = get_completed_today_15m(intraday, now)
+    if completed is None or previous_close is None or float(previous_close) <= 0:
         return None
-
-    local = frame.copy()
-    local["local_time"] = local["date"].dt.tz_convert("Asia/Kolkata")
-    local["session_date"] = local["local_time"].dt.date
-    local["clock"] = local["local_time"].dt.strftime("%H:%M")
-    expected = {"09:15", "09:30", "09:45"}
-    local = local[local["clock"].isin(expected)].copy()
-
-    def first_45m_volume(group):
-        by_clock = group.drop_duplicates("clock").set_index("clock")
-        if not expected.issubset(set(by_clock.index)):
-            return None
-        values = pd.to_numeric(by_clock.loc[["09:15", "09:30", "09:45"], "volume"], errors="coerce")
-        if values.isna().any():
-            return None
-        return float(values.sum())
-
-    today_rows = local[local["session_date"] == now.date()]
-    today_volume = first_45m_volume(today_rows)
-    if today_volume is None:
+    clocks = completed["clock"].tolist()
+    if not clocks:
         return None
+    today_volume = pd.to_numeric(completed["volume"], errors="coerce")
+    if today_volume.isna().any():
+        return None
+    today_volume = float(today_volume.sum())
 
+    history = intraday.copy()
+    history["local_time"] = history["date"].dt.tz_convert("Asia/Kolkata")
+    history["session_date"] = history["local_time"].dt.date
+    history["clock"] = history["local_time"].dt.strftime("%H:%M")
+    history = history[history["session_date"] < now.date()]
+    history = history[history["clock"].isin(clocks)].copy()
     historical = []
-    for session_date, group in local[local["session_date"] < now.date()].groupby("session_date"):
-        volume = first_45m_volume(group)
-        if volume is not None:
-            historical.append((session_date, volume))
+    for session_date, group in history.groupby("session_date"):
+        by_clock = group.drop_duplicates("clock").set_index("clock")
+        if not all(clock in by_clock.index for clock in clocks):
+            continue
+        values = pd.to_numeric(by_clock.loc[clocks, "volume"], errors="coerce")
+        if values.isna().any():
+            continue
+        historical.append((session_date, float(values.sum())))
     historical.sort(key=lambda item: item[0], reverse=True)
     historical = historical[:20]
     if len(historical) < 20:
@@ -267,10 +288,7 @@ def opening_volume_metrics(symbol, now, previous_close):
     average_volume = sum(value for _, value in historical) / len(historical)
     if average_volume <= 0:
         return None
-    latest_close_rows = today_rows[today_rows["clock"] == "09:45"]
-    if latest_close_rows.empty or previous_close is None or float(previous_close) <= 0:
-        return None
-    latest_close = float(latest_close_rows.iloc[-1]["close"])
+    latest_close = float(completed.iloc[-1]["close"])
     change_pct = (latest_close / float(previous_close) - 1) * 100
     relative_volume = today_volume / average_volume
     volume_label = (
@@ -279,12 +297,13 @@ def opening_volume_metrics(symbol, now, previous_close):
         "NORMAL"
     )
     return {
-        "OPENING_45M_VOLUME": int(today_volume),
+        "SESSION_VOLUME_TO_TIME": int(today_volume),
         "AVG_20D_SAME_TIME_VOLUME": round(average_volume, 1),
-        "RELATIVE_VOLUME_45M": round(relative_volume, 2),
+        "RELATIVE_VOLUME_TO_TIME": round(relative_volume, 2),
         "VOLUME_STRENGTH": volume_label,
         "CHANGE_FROM_PREV_CLOSE_PCT": round(change_pct, 2),
         "TREND_STRENGTH_PCT": round(abs(change_pct), 2),
+        "DATA_AS_OF": completed["local_time"].iloc[-1].strftime("%H:%M"),
     }
 
 
@@ -370,50 +389,69 @@ def main():
         else:
             row["ALIGNMENT"] = "MIXED / SIDEWAYS"
 
-    # Only four-timeframe aligned stocks are eligible for the live 45-minute confirmation.
+    # 6/6 rule: the fixed 10:00 opening trend AND the trend through this run-time must agree.
     base_aligned = [x for x in results if x.get("ALIGNMENT") in ("4/4 UPTREND", "4/4 DOWNTREND")]
     live_checked = []
+    rejected_10am = 0
+    rejected_runtime = 0
     if now_ist().hour < 10:
-        print("Opening 45-minute filter is not ready before 10:00 IST; no stocks will be published.")
+        print("10:00 confirmation is not ready; no trend candidates will be published.")
     else:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            checks = {pool.submit(confirm_opening_45m, row, now_ist()): row for row in base_aligned}
+            checks = {
+                pool.submit(fetch_chart, row["symbol"], "60d", "15m", 3): row
+                for row in base_aligned
+            }
             for future in as_completed(checks):
                 row = checks[future]
                 try:
-                    confirmation = future.result()
+                    intraday = future.result()
                 except Exception as exc:
-                    print(f"15m confirmation error {row['symbol']}: {exc}")
-                    confirmation = "DATA NOT AVAILABLE"
+                    print(f"15m data error {row['symbol']}: {exc}")
+                    intraday = None
+                previous_close = row.get("PREVIOUS_DAY_CLOSE")
+                opening_confirmation = confirm_opening_45m(intraday, now_ist(), previous_close)
                 expected_direction = "UPTREND" if row["ALIGNMENT"] == "4/4 UPTREND" else "DOWNTREND"
-                if confirmation == expected_direction:
-                    row["15M 45MIN"] = confirmation
-                    row["ALIGNMENT"] = "5/5 UPTREND" if expected_direction == "UPTREND" else "5/5 DOWNTREND"
-                    volume_data = opening_volume_metrics(row["symbol"], now_ist(), row.get("PREVIOUS_DAY_CLOSE"))
-                    if volume_data is None:
-                        row["VOLUME_DATA_STATUS"] = "NOT AVAILABLE - 20 complete prior sessions required"
-                        row["RELATIVE_VOLUME_45M"] = None
-                        row["VOLUME_STRENGTH"] = "DATA NOT AVAILABLE"
-                        row["CHANGE_FROM_PREV_CLOSE_PCT"] = None
-                        row["TREND_STRENGTH_PCT"] = None
-                    else:
-                        row.update(volume_data)
-                        row["VOLUME_DATA_STATUS"] = "OK"
-                    live_checked.append(row)
+                if opening_confirmation != expected_direction:
+                    rejected_10am += 1
+                    continue
+                runtime_confirmation, data_as_of = confirm_runtime_trend(intraday, now_ist(), previous_close)
+                if runtime_confirmation != expected_direction:
+                    rejected_runtime += 1
+                    continue
 
-    all_up = [x["symbol"] for x in live_checked if x.get("ALIGNMENT") == "5/5 UPTREND"]
-    all_down = [x["symbol"] for x in live_checked if x.get("ALIGNMENT") == "5/5 DOWNTREND"]
+                row["15M 10AM"] = opening_confirmation
+                row["15M RUN-TIME"] = runtime_confirmation
+                row["DATA_AS_OF"] = data_as_of
+                row["ALIGNMENT"] = "6/6 UPTREND" if expected_direction == "UPTREND" else "6/6 DOWNTREND"
+                volume_data = time_matched_volume_metrics(intraday, now_ist(), previous_close)
+                if volume_data is None:
+                    row["VOLUME_DATA_STATUS"] = "NOT AVAILABLE - 20 complete same-time sessions required"
+                    row["RELATIVE_VOLUME_TO_TIME"] = None
+                    row["VOLUME_STRENGTH"] = "DATA NOT AVAILABLE"
+                    row["CHANGE_FROM_PREV_CLOSE_PCT"] = None
+                    row["TREND_STRENGTH_PCT"] = None
+                else:
+                    row.update(volume_data)
+                    row["VOLUME_DATA_STATUS"] = "OK"
+                    row["DATA_AS_OF"] = volume_data["DATA_AS_OF"]
+                rvol = row.get("RELATIVE_VOLUME_TO_TIME")
+                row["STATUS"] = "GREEN - STRONG TREND" if rvol is not None and rvol >= 1.5 else "YELLOW - WATCH"
+                live_checked.append(row)
+
+    all_up = [x["symbol"] for x in live_checked if x.get("ALIGNMENT") == "6/6 UPTREND"]
+    all_down = [x["symbol"] for x in live_checked if x.get("ALIGNMENT") == "6/6 DOWNTREND"]
     volume_ranked = sorted(
-        [x for x in live_checked if x.get("RELATIVE_VOLUME_45M") is not None],
-        key=lambda x: x["RELATIVE_VOLUME_45M"], reverse=True
+        [x for x in live_checked if x.get("RELATIVE_VOLUME_TO_TIME") is not None],
+        key=lambda x: x["RELATIVE_VOLUME_TO_TIME"], reverse=True
     )
     trend_ranked = sorted(
         [x for x in live_checked if x.get("TREND_STRENGTH_PCT") is not None],
         key=lambda x: x["TREND_STRENGTH_PCT"], reverse=True
     )
-    # Transparent screening score: 60% capped relative volume + 40% capped absolute move.
+    # Transparent ranking: 60% capped relative volume + 40% capped absolute move.
     for item in live_checked:
-        rvol = item.get("RELATIVE_VOLUME_45M")
+        rvol = item.get("RELATIVE_VOLUME_TO_TIME")
         move = item.get("TREND_STRENGTH_PCT")
         item["COMBINED_SCORE"] = (
             round(60 * min(float(rvol), 5.0) / 5.0 + 40 * min(float(move), 5.0) / 5.0, 1)
@@ -428,49 +466,57 @@ def main():
         live_checked,
         columns=[
             "symbol", "company", "MONTHLY", "WEEKLY", "DAILY", "1 HOUR",
-            "15M 45MIN", "ALIGNMENT", "PREVIOUS_DAY_CLOSE",
-            "OPENING_45M_VOLUME", "AVG_20D_SAME_TIME_VOLUME",
-            "RELATIVE_VOLUME_45M", "VOLUME_STRENGTH",
+            "15M 10AM", "15M RUN-TIME", "ALIGNMENT", "STATUS", "DATA_AS_OF", "PREVIOUS_DAY_CLOSE",
+            "SESSION_VOLUME_TO_TIME", "AVG_20D_SAME_TIME_VOLUME",
+            "RELATIVE_VOLUME_TO_TIME", "VOLUME_STRENGTH",
             "CHANGE_FROM_PREV_CLOSE_PCT", "TREND_STRENGTH_PCT", "COMBINED_SCORE",
             "VOLUME_DATA_STATUS",
         ],
     ).to_csv("nse_timeframe_trends.csv", index=False)
 
+    report_as_of = now_ist()
     lines = [
-        "NSE MULTI-TIMEFRAME + LIVE 45-MIN TREND REPORT",
-        f"Date: {now_ist():%d-%m-%Y %H:%M IST}",
-        f"Universe: {len(universe)} NSE EQ symbols | scanned rows: {len(results)} | errors: {errors}",
-        "First 4 filters: Monthly, Weekly, Daily and 1 Hour close-to-close direction must all agree.",
-        "5th filter: first three completed 15-minute candle CLOSES (09:15, 09:30, 09:45) must ALL be above previous session close for UPTREND, or ALL below it for DOWNTREND. High/Low are ignored.",
-        "Only stocks passing all 5 filters are shown. Mixed, sideways, incomplete and 15m-failed stocks are excluded.",
-        f"5/5 UPTREND: {len(all_up)}",
+        "NSE MULTI-TIMEFRAME LIVE TREND REPORT",
+        f"Run time: {report_as_of:%d-%m-%Y %H:%M IST}",
+        f"Data as of latest completed 15m candle: {max([x.get('DATA_AS_OF', 'N/A') for x in live_checked], default='N/A')} IST",
+        f"Universe: {len(universe)} NSE EQ | scanned: {len(results)} | errors: {errors}",
+        "STRICT RULE: 4 timeframe directions + fixed 10AM trend + run-time trend must all agree (6/6).",
+        "10AM check: 09:15, 09:30, 09:45 candle CLOSES all on the same side of previous session close.",
+        "RUN-TIME check: every completed 15m candle from market open through the latest completed candle must stay on that same side of previous close.",
+        f"GREEN - STRONG TREND: {sum(1 for x in live_checked if x.get('STATUS', '').startswith('GREEN'))}",
+        f"YELLOW - WATCH: {sum(1 for x in live_checked if x.get('STATUS', '').startswith('YELLOW'))}",
+        f"REJECTED at 10AM confirmation: {rejected_10am} | Rejected at run-time confirmation: {rejected_runtime}",
+        "",
+        f"6/6 UPTREND: {len(all_up)}",
         "Stocks: " + (", ".join(all_up) if all_up else "None"),
         "",
-        f"5/5 DOWNTREND: {len(all_down)}",
+        f"6/6 DOWNTREND: {len(all_down)}",
         "Stocks: " + (", ".join(all_down) if all_down else "None"),
         "",
-        "VOLUME TOP 10 (first 45m vs prior 20 sessions, same time):",
+        "TOP VOLUME (cumulative volume vs prior 20 sessions, same completed 15m slots):",
         *([
-            f"{x['symbol']} | RVOL {x['RELATIVE_VOLUME_45M']:.2f}x | {x['VOLUME_STRENGTH']} | {x['ALIGNMENT']}"
+            f"{x['symbol']} | RVOL {x['RELATIVE_VOLUME_TO_TIME']:.2f}x | {x['VOLUME_STRENGTH']} | {x['STATUS']} | {x['ALIGNMENT']} | Data {x.get('DATA_AS_OF', 'N/A')}"
             for x in volume_ranked[:10]
-        ] or ["No eligible volume data"]),
+        ] or ["No eligible same-time volume data"]),
         "",
-        "TREND TOP 10 (absolute move from previous close at 10:00):",
+        "TOP TREND (latest completed 15m close vs previous session close):",
         *([
-            f"{x['symbol']} | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['ALIGNMENT']}"
+            f"{x['symbol']} | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['ALIGNMENT']} | {x['STATUS']} | Data {x.get('DATA_AS_OF', 'N/A')}"
             for x in trend_ranked[:10]
         ] or ["No eligible trend data"]),
         "",
-        "BEST VOLUME + TREND TOP 5 (heuristic score /100; not a buy signal):",
+        "BEST VOLUME + TREND TOP 5 (ranking score /100; NOT a buy signal):",
         *([
-            f"{x['symbol']} | Score {x['COMBINED_SCORE']:.1f}/100 | RVOL {x['RELATIVE_VOLUME_45M']:.2f}x | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['ALIGNMENT']}"
+            f"{x['symbol']} | Score {x['COMBINED_SCORE']:.1f}/100 | RVOL {x['RELATIVE_VOLUME_TO_TIME']:.2f}x | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['STATUS']}"
             for x in combined_ranked[:5]
         ] or ["No combined ranking available"]),
         "",
+        "GREEN = 6/6 alignment + same-time relative volume >=1.5x. YELLOW = 6/6 alignment but volume below 1.5x or unavailable.",
+        "RED / REJECT = not shown in candidate list because one or more required trend confirmations failed or data was unavailable.",
         "Volume strength: STRONG >=1.5x; MODERATE 1.2x-1.49x; NORMAL <1.2x.",
-        "Combined score = 60% relative-volume component (capped at 5x) + 40% absolute price-move component (capped at 5%). Heuristic only.",
-        "If same-time volume history is incomplete, stock remains in 5/5 report but is excluded from volume/combined ranking.",
-        "CSV artifact contains only stocks passing all five original filters, with added volume/trend fields.",
+        "Combined score is a heuristic ranking only, not an entry signal. Entry still requires your 5-minute candle CLOSE above today's high and a planned stop-loss.",
+        "If Yahoo intraday data is delayed/incomplete, the scanner can reject the symbol or show unavailable data; verify the candle timestamp before trading.",
+        "CSV artifact contains only 6/6 candidates and their run-time volume/trend fields.",
     ]
     message = "\n".join(lines)
     print(message)
