@@ -431,7 +431,7 @@ def main():
             "15M 45MIN", "ALIGNMENT", "PREVIOUS_DAY_CLOSE",
             "OPENING_45M_VOLUME", "AVG_20D_SAME_TIME_VOLUME",
             "RELATIVE_VOLUME_45M", "VOLUME_STRENGTH",
-            "CHANGE_FROM_PREV_CLOSE_PCT", "TREND_STRENGTH_PCT",
+            "CHANGE_FROM_PREV_CLOSE_PCT", "TREND_STRENGTH_PCT", "COMBINED_SCORE",
             "VOLUME_DATA_STATUS",
         ],
     ).to_csv("nse_timeframe_trends.csv", index=False)
