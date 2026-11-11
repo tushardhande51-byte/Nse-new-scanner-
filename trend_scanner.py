@@ -436,7 +436,7 @@ def main():
                     row["VOLUME_DATA_STATUS"] = "OK"
                     row["DATA_AS_OF"] = volume_data["DATA_AS_OF"]
                 rvol = row.get("RELATIVE_VOLUME_TO_TIME")
-                row["STATUS"] = "GREEN - STRONG TREND" if rvol is not None and rvol >= 1.5 else "YELLOW - WATCH"
+                row["STATUS"] = "🟢 GREEN - STRONG TREND" if rvol is not None and rvol >= 1.5 else "🟡 YELLOW - WATCH"
                 live_checked.append(row)
 
     all_up = [x["symbol"] for x in live_checked if x.get("ALIGNMENT") == "6/6 UPTREND"]
@@ -483,9 +483,9 @@ def main():
         "STRICT RULE: 4 timeframe directions + fixed 10AM trend + run-time trend must all agree (6/6).",
         "10AM check: 09:15, 09:30, 09:45 candle CLOSES all on the same side of previous session close.",
         "RUN-TIME check: every completed 15m candle from market open through the latest completed candle must stay on that same side of previous close.",
-        f"GREEN - STRONG TREND: {sum(1 for x in live_checked if x.get('STATUS', '').startswith('GREEN'))}",
-        f"YELLOW - WATCH: {sum(1 for x in live_checked if x.get('STATUS', '').startswith('YELLOW'))}",
-        f"RED - REJECT: {rejected_10am + rejected_runtime} (10AM failed/unavailable: {rejected_10am} | run-time failed/unavailable: {rejected_runtime})",
+        f"GREEN - STRONG TREND: {sum(1 for x in live_checked if x.get('STATUS', '').startswith('🟢 GREEN'))}",
+        f"YELLOW - WATCH: {sum(1 for x in live_checked if x.get('STATUS', '').startswith('🟡 YELLOW'))}",
+        f"🔴 RED - REJECT: {rejected_10am + rejected_runtime} (10AM failed/unavailable: {rejected_10am} | run-time failed/unavailable: {rejected_runtime})",
         "",
         f"6/6 UPTREND: {len(all_up)}",
         "Stocks: " + (", ".join(all_up) if all_up else "None"),
@@ -511,8 +511,8 @@ def main():
             for x in combined_ranked[:5]
         ] or ["No combined ranking available"]),
         "",
-        "GREEN = 6/6 alignment + same-time relative volume >=1.5x. YELLOW = 6/6 alignment but volume below 1.5x or unavailable.",
-        "RED / REJECT = not shown in candidate list because one or more required trend confirmations failed or data was unavailable.",
+        "🟢 GREEN = 6/6 alignment + same-time relative volume >=1.5x. 🟡 YELLOW = 6/6 alignment but volume below 1.5x or unavailable.",
+        "🔴 RED / REJECT = not shown in candidate list because one or more required trend confirmations failed or data was unavailable.",
         "Volume strength: STRONG >=1.5x; MODERATE 1.2x-1.49x; NORMAL <1.2x.",
         "Combined score is a heuristic ranking only, not an entry signal. Entry still requires your 5-minute candle CLOSE above today's high and a planned stop-loss.",
         "If Yahoo intraday data is delayed/incomplete, the scanner can reject the symbol or show unavailable data; verify the candle timestamp before trading.",
