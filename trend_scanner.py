@@ -485,7 +485,7 @@ def main():
         "RUN-TIME check: every completed 15m candle from market open through the latest completed candle must stay on that same side of previous close.",
         f"GREEN - STRONG TREND: {sum(1 for x in live_checked if x.get('STATUS', '').startswith('GREEN'))}",
         f"YELLOW - WATCH: {sum(1 for x in live_checked if x.get('STATUS', '').startswith('YELLOW'))}",
-        f"REJECTED at 10AM confirmation: {rejected_10am} | Rejected at run-time confirmation: {rejected_runtime}",
+        f"RED - REJECT: {rejected_10am + rejected_runtime} (10AM failed/unavailable: {rejected_10am} | run-time failed/unavailable: {rejected_runtime})",
         "",
         f"6/6 UPTREND: {len(all_up)}",
         "Stocks: " + (", ".join(all_up) if all_up else "None"),
