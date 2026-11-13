@@ -417,77 +417,89 @@ def main():
 
     report_date = now_ist().strftime("%d-%m-%Y")
     lines = [
-        "━━━━━━━━━━━━━━━━━━━━",
-        "📊 NSE SWING REPORT",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"📅 {report_date} | NSE EQ: {len(universe)}",
-        f"✅ 6/6 PASS: {len(matches)} | ❗ Errors: {errors}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "📊 NSE SWING SCANNER | EOD REPORT",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📅 Date: {report_date}",
+        f"📊 NSE EQ: {len(universe)} | Scanned: {len(universe) - errors} | Errors: {errors}",
+        f"✅ Qualified (strict 6/6): {len(matches)}",
         "",
-        "RULE: All 6 filters passed. Risk/R:R does not remove a stock.",
-        "PROJ. = calculated target; not a confirmed resistance.",
-        "BOOKING: T1 50% | T2 30% | T3 20%",
-        "After T1: SL below support.",
-        "━━━━━━━━━━━━━━━━━━━━",
+        "📌 SCANNER RULES",
+        "• Strict 6/6 technical filters required.",
+        "• Risk/R:R does NOT remove a 6/6 stock.",
+        "• PIVOT = actual overhead pivot resistance.",
+        "• PROJ. = calculated target; not confirmed resistance.",
+        "• Booking: T1 50% | T2 30% | T3 20%.",
+        "• After T1, trail SL below support.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
     if not matches:
-        lines.extend(["❌ TODAY: NO 6/6 STOCK FOUND"])
+        lines.extend(["❌ NO QUALIFIED STOCK TODAY", "No NSE stock passed all 6 technical filters."])
     else:
-        lines.extend(["🏆 TOP STOCKS (ADX / VOLUME)", ""])
-        for rank, item in enumerate(matches[:5], start=1):
-            lines.append(
-                f"{rank}. {item['symbol']} | ADX {item['adx']:.1f} | "
-                f"Vol {item['volume_ratio']:.1f}x | {item['trade_quality_emoji']}"
-            )
-        lines.extend(["", "📋 ALL 6/6 STOCKS"])
+        lines.extend(["🏆 TOP 3 QUALIFIED STOCKS SUMMARY", ""])
+        for rank, item in enumerate(matches[:3], start=1):
+            lines.extend([
+                f"{rank}. {item['symbol']} | {item['company']}",
+                f"   ADX: {item['adx']:.1f} | Rel Vol: {item['volume_ratio']:.1f}x",
+                f"   Quality: {item['trade_quality_emoji']} {item['trade_quality']} | Risk: {item['stoploss_risk_pct_from_entry']:.2f}%",
+                "",
+            ])
+        lines.extend(["📋 ALL QUALIFIED STOCKS", ""])
         for rank, item in enumerate(matches, start=1):
             lines.append(f"{rank}. {item['symbol']} - {item['company']}")
-        lines.extend(["", "━━━━━━━━━━━━━━━━━━━━", "📌 TRADE DETAILS", ""])
-
+        lines.extend(["", "━━━━━━━━━━━━━━━━━━━━━━━━", "📌 DETAILED TRADE SETUPS", ""])
         for rank, item in enumerate(matches[:20], start=1):
             resistance_text = (
-                f"Rs {item['nearest_actual_resistance']:.2f} "
-                f"({item['resistance_gap_pct']:.1f}% away)"
-                if item["nearest_actual_resistance"] is not None else "Not found"
+                f"₹{item['nearest_actual_resistance']:.2f} ({item['resistance_gap_pct']:.1f}% away)"
+                if item["nearest_actual_resistance"] is not None else "No overhead pivot found"
             )
             lines.extend([
-                "┏━━━━━━━━━━━━━━━━━━━━",
-                f"┃ {rank}. {item['symbol']} - {item['company']}",
-                "┗━━━━━━━━━━━━━━━━━━━━",
-                f"{item['trade_quality_emoji']} {item['trade_quality']}",
-                f"Filters: {item['filters_passed']}",
+                f"🔹 STOCK {rank}: {item['symbol']} - {item['company']}",
+                f"Status: {item['trade_quality_emoji']} {item['trade_quality']}",
+                f"Technical filters: {item['filters_passed']}",
                 "",
-                "💰 ENTRY / STOP-LOSS",
-                f"Entry: Rs {item['entry']:.2f}",
-                f"Stop-loss: Rs {item['stoploss']:.2f}",
+                "💰 ENTRY & RISK",
+                f"Entry: ₹{item['entry']:.2f}",
+                f"Stop-loss: ₹{item['stoploss']:.2f}",
                 f"Risk: {item['stoploss_risk_pct_from_entry']:.2f}%",
-                f"Support: Rs {item['support']:.2f}",
+                f"Support: ₹{item['support']:.2f} ({item['support_source']})",
                 "",
-                "🎯 TARGETS (BOOKING)",
-                f"T1: Rs {item['target_1']:.2f} | 50% | " + ("PIVOT" if item["target_1_resistance_price"] is not None else "PROJ."),
-                f"T2: Rs {item['target_2']:.2f} | 30% | " + ("PIVOT" if item["target_2_resistance_price"] is not None else "PROJ."),
-                f"T3: Rs {item['target_3']:.2f} | 20% | " + ("PIVOT" if item["target_3_resistance_price"] is not None else "PROJ."),
-                f"T1 R:R: 1:{item['risk_reward_to_t1']:.2f} | {item['rr_assessment']}",
+                "🎯 TARGETS & PROFIT BOOKING",
+                f"T1: ₹{item['target_1']:.2f} | Book 50% | {'PIVOT' if item['target_1_resistance_price'] is not None else 'PROJ.'}",
+                f"T2: ₹{item['target_2']:.2f} | Book 30% | {'PIVOT' if item['target_2_resistance_price'] is not None else 'PROJ.'}",
+                f"T3: ₹{item['target_3']:.2f} | Book 20% | {'PIVOT' if item['target_3_resistance_price'] is not None else 'PROJ.'}",
+                f"T1 Risk:Reward: 1:{item['risk_reward_to_t1']:.2f} ({item['rr_assessment']})",
+                "After T1: Keep remaining-position SL below support.",
                 "",
-                "🧱 RESISTANCE",
-                f"Nearest: {resistance_text}",
-                f"Note: {item['resistance_warning']}",
-                "",
-                "📈 MOMENTUM",
+                "📈 MOMENTUM / VOLUME / RESISTANCE",
                 f"RSI: {item['rsi']:.1f} | ADX: {item['adx']:.1f}",
-                f"Volume: {item['volume_ratio']:.1f}x average",
-                f"Volume note: {item['volume_warning']}",
+                f"Relative Volume: {item['volume_ratio']:.1f}x | {item['volume_warning']}",
+                f"Nearest resistance: {resistance_text}",
+                f"Resistance note: {item['resistance_warning']}",
                 "",
-                "⚠️ Check risk before entry. After T1, keep SL below support.",
-                "────────────────────",
+                "⚠️ Verify current price and liquidity before entry.",
+                "━━━━━━━━━━━━━━━━━━━━━━━━",
                 "",
             ])
         if len(matches) > 20:
-            lines.append(f"Showing 20 of {len(matches)} setups. Full data: nse_swing_signals.csv")
+            lines.append(f"Showing first 20 detailed setups out of {len(matches)} qualified stocks. CSV has all results.")
+        red_matches = [item for item in matches if item["trade_quality_emoji"] == "🔴"]
+        yellow_matches = [item for item in matches if item["trade_quality_emoji"] == "🟡"]
+        green_matches = [item for item in matches if item["trade_quality_emoji"] == "🟢"]
+        lines.extend(["", "🛡️ FINAL RISK SUMMARY"])
+        lines.append(f"🟢 Green: {len(green_matches)} | 🟡 Yellow: {len(yellow_matches)} | 🔴 Red: {len(red_matches)}")
+        if red_matches:
+            lines.append("High-risk stocks - avoid blind entry; review stop-loss and position size:")
+            for item in red_matches:
+                lines.append(f"• {item['symbol']}: risk {item['stoploss_risk_pct_from_entry']:.2f}% | T1 R:R 1:{item['risk_reward_to_t1']:.2f}")
+        else:
+            lines.append("No stock is marked RED by the scanner's current quality rules.")
     lines.extend([
         "",
-        "DATA: NSE + Yahoo Finance daily candles.",
-        "Verify current market price before trading. No orders placed.",
+        "DATA: NSE universe + Yahoo Finance daily candles.",
+        "This is an EOD scan, not a live entry signal. Verify current market price before trading.",
+        "No broker connection. No orders placed.",
     ])
     message = "\n".join(lines)
     print(message)
