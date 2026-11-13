@@ -420,9 +420,19 @@ def main():
         lines.append("No stock passed the strict 6/6 technical filters. Support/targets and R:R do not reject 6/6 matches.")
     else:
         lines.append(f"Actionable matches: {len(matches)}")
-        for item in matches[:20]:
+        lines.append("")
+        lines.append("TOP 5 STOCKS - RANKED")
+        for rank, item in enumerate(matches[:5], start=1):
+            lines.append(f"{rank}. {item['symbol']} - {item['company']}")
+        lines.append("")
+        lines.append("ALL QUALIFIED STOCKS - COMPLETE NAME LIST")
+        for rank, item in enumerate(matches, start=1):
+            lines.append(f"{rank}. {item['symbol']} - {item['company']}")
+        lines.append("")
+        lines.append("DETAILED TRADE SETUPS - TOP 20")
+        for rank, item in enumerate(matches[:20], start=1):
             lines.extend([
-                f"{item['symbol']} - {item['company']}",
+                f"{rank}. {item['symbol']} - {item['company']}",
                 f"{item['trade_quality_emoji']} TRADE QUALITY: {item['trade_quality']}",
                 f"Daily technical filters: {item['filters_passed']}",
                 f"Entry: Rs {item['entry']:.2f}",
