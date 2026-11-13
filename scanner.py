@@ -321,28 +321,37 @@ def evaluate(symbol, company):
 
 
 def split_telegram_message(message, max_length=3500):
-    """Split long Telegram text into safe chunks without cutting normal lines."""
+    """Split reports at stock boundaries so Telegram parts do not cut a setup in half."""
+    lines = message.splitlines()
     chunks = []
-    current = ""
-    for line in message.splitlines():
-        # A single unusually long line is split safely as a last resort.
-        while len(line) > max_length:
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.append(line[:max_length])
-            line = line[max_length:]
-        candidate = line if not current else current + "\\n" + line
-        if len(candidate) > max_length:
-            if current:
-                chunks.append(current)
-            current = line
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks or [""]
+    current = []
 
+    def flush():
+        nonlocal current
+        text = "\\n".join(current).strip()
+        if text:
+            chunks.append(text)
+        current = []
+
+    for line in lines:
+        # Start a new Telegram part before a stock card, never in the middle of one.
+        if line.startswith("┏━━━━━━━━━━━━━━━━━━━━") and current:
+            if len("\\n".join(current)) > 1700:
+                flush()
+
+        candidate = "\\n".join(current + [line])
+        if len(candidate) > max_length and current:
+            flush()
+            candidate = line
+
+        # A single line should never be large, but retain a safe fallback.
+        while len(candidate) > max_length:
+            chunks.append(candidate[:max_length])
+            candidate = candidate[max_length:]
+        current = [candidate] if not current else current + [line]
+
+    flush()
+    return chunks or [""]
 
 def send_telegram(message):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -409,90 +418,76 @@ def main():
     report_date = now_ist().strftime("%d-%m-%Y")
     lines = [
         "━━━━━━━━━━━━━━━━━━━━",
-        "📊 NSE SWING SCANNER | EOD REPORT",
+        "📊 NSE SWING REPORT",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"📅 Date: {report_date}",
-        f"🔎 NSE EQ scanned: {len(universe)}",
-        f"✅ Strict 6/6 matches: {len(matches)}",
-        f"⚠️ Data errors: {errors}",
+        f"📅 {report_date} | NSE EQ: {len(universe)}",
+        f"✅ 6/6 PASS: {len(matches)} | ❗ Errors: {errors}",
         "",
-        "FILTERS: All 6 technical conditions must pass.",
-        "IMPORTANT: R:R / SL risk does not remove a 6/6 match.",
-        "Targets marked PROJECTED are estimates, not actual resistance.",
+        "RULE: All 6 filters passed. Risk/R:R does not remove a stock.",
+        "PROJ. = calculated target; not a confirmed resistance.",
         "BOOKING: T1 50% | T2 30% | T3 20%",
-        "After T1: keep remaining SL below support.",
+        "After T1: SL below support.",
         "━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
     if not matches:
-        lines.extend([
-            "❌ NO QUALIFIED STOCK TODAY",
-            "No stock passed all 6 technical filters.",
-        ])
+        lines.extend(["❌ TODAY: NO 6/6 STOCK FOUND"])
     else:
-        lines.extend([
-            f"🏆 TOP 5 | OUT OF {len(matches)} MATCHES",
-            "Ranked by ADX strength, then relative volume:",
-        ])
+        lines.extend(["🏆 TOP STOCKS (ADX / VOLUME)", ""])
         for rank, item in enumerate(matches[:5], start=1):
             lines.append(
-                f"{rank}) {item['symbol']} | ADX {item['adx']:.1f} | "
+                f"{rank}. {item['symbol']} | ADX {item['adx']:.1f} | "
                 f"Vol {item['volume_ratio']:.1f}x | {item['trade_quality_emoji']}"
             )
-        lines.extend(["", "📋 ALL QUALIFIED STOCKS", ""])
+        lines.extend(["", "📋 ALL 6/6 STOCKS"])
         for rank, item in enumerate(matches, start=1):
-            lines.append(f"{rank}) {item['symbol']} - {item['company']}")
-        lines.extend(["", "━━━━━━━━━━━━━━━━━━━━", "📌 DETAILED SETUPS | TOP 20", "━━━━━━━━━━━━━━━━━━━━", ""])
+            lines.append(f"{rank}. {item['symbol']} - {item['company']}")
+        lines.extend(["", "━━━━━━━━━━━━━━━━━━━━", "📌 TRADE DETAILS", ""])
 
         for rank, item in enumerate(matches[:20], start=1):
             resistance_text = (
                 f"Rs {item['nearest_actual_resistance']:.2f} "
-                f"({item['resistance_gap_pct']:.2f}% above entry)"
+                f"({item['resistance_gap_pct']:.1f}% away)"
                 if item["nearest_actual_resistance"] is not None else "Not found"
             )
             lines.extend([
                 "┏━━━━━━━━━━━━━━━━━━━━",
-                f"┃ {rank}) {item['symbol']}",
-                f"┃ {item['company']}",
+                f"┃ {rank}. {item['symbol']} - {item['company']}",
                 "┗━━━━━━━━━━━━━━━━━━━━",
-                f"{item['trade_quality_emoji']} QUALITY: {item['trade_quality']}",
-                f"✅ Technical filters: {item['filters_passed']}",
+                f"{item['trade_quality_emoji']} {item['trade_quality']}",
+                f"Filters: {item['filters_passed']}",
                 "",
-                "💰 ENTRY & RISK",
+                "💰 ENTRY / STOP-LOSS",
                 f"Entry: Rs {item['entry']:.2f}",
                 f"Stop-loss: Rs {item['stoploss']:.2f}",
-                f"Risk to SL: {item['stoploss_risk_pct_from_entry']:.2f}%",
-                f"Support: Rs {item['support']:.2f} ({item['support_source']})",
+                f"Risk: {item['stoploss_risk_pct_from_entry']:.2f}%",
+                f"Support: Rs {item['support']:.2f}",
                 "",
-                "🎯 TARGETS & BOOKING",
-                f"T1: Rs {item['target_1']:.2f} | Book 50% | {item['target_1_source']}" +
-                    (f" (pivot Rs {item['target_1_resistance_price']:.2f})" if item["target_1_resistance_price"] is not None else ""),
-                f"T2: Rs {item['target_2']:.2f} | Book 30% | {item['target_2_source']}" +
-                    (f" (pivot Rs {item['target_2_resistance_price']:.2f})" if item["target_2_resistance_price"] is not None else ""),
-                f"T3: Rs {item['target_3']:.2f} | Book 20% | {item['target_3_source']}" +
-                    (f" (pivot Rs {item['target_3_resistance_price']:.2f})" if item["target_3_resistance_price"] is not None else ""),
-                f"T1 Risk:Reward: 1:{item['risk_reward_to_t1']:.2f} ({item['rr_assessment']})",
+                "🎯 TARGETS (BOOKING)",
+                f"T1: Rs {item['target_1']:.2f} | 50% | " + ("PIVOT" if item["target_1_resistance_price"] is not None else "PROJ."),
+                f"T2: Rs {item['target_2']:.2f} | 30% | " + ("PIVOT" if item["target_2_resistance_price"] is not None else "PROJ."),
+                f"T3: Rs {item['target_3']:.2f} | 20% | " + ("PIVOT" if item["target_3_resistance_price"] is not None else "PROJ."),
+                f"T1 R:R: 1:{item['risk_reward_to_t1']:.2f} | {item['rr_assessment']}",
                 "",
-                "🧱 RESISTANCE CHECK",
-                f"Nearest actual resistance: {resistance_text}",
-                f"Status: {item['resistance_warning']}",
+                "🧱 RESISTANCE",
+                f"Nearest: {resistance_text}",
+                f"Note: {item['resistance_warning']}",
                 "",
-                "📈 MOMENTUM & VOLUME",
+                "📈 MOMENTUM",
                 f"RSI: {item['rsi']:.1f} | ADX: {item['adx']:.1f}",
-                f"Volume: {item['volume_ratio']:.1f}x average | {item['volume_warning']}",
+                f"Volume: {item['volume_ratio']:.1f}x average",
+                f"Volume note: {item['volume_warning']}",
                 "",
-                "⚠️ PLAN: Check the stated SL risk and actual resistance before entry.",
-                "After T1, keep remaining-position SL below support.",
+                "⚠️ Check risk before entry. After T1, keep SL below support.",
                 "────────────────────",
                 "",
             ])
         if len(matches) > 20:
-            lines.append(f"ℹ️ Detailed setups shown: 20/{len(matches)}. Full CSV: nse_swing_signals.csv")
+            lines.append(f"Showing 20 of {len(matches)} setups. Full data: nse_swing_signals.csv")
     lines.extend([
         "",
-        "DATA SOURCE: NSE EQ universe + Yahoo Finance daily candles.",
-        "Verify live price and levels before placing any trade.",
-        "No broker connection | No orders placed",
+        "DATA: NSE + Yahoo Finance daily candles.",
+        "Verify current market price before trading. No orders placed.",
     ])
     message = "\n".join(lines)
     print(message)
