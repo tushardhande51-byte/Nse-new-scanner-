@@ -321,37 +321,43 @@ def evaluate(symbol, company):
 
 
 def split_telegram_message(message, max_length=3500):
-    """Split reports at stock boundaries so Telegram parts do not cut a setup in half."""
+    """Split at stock-card boundaries so Telegram parts stay readable."""
     lines = message.splitlines()
     chunks = []
     current = []
 
     def flush():
         nonlocal current
-        text = "\\n".join(current).strip()
-        if text:
-            chunks.append(text)
+        part = "\n".join(current).strip()
+        if part:
+            chunks.append(part)
         current = []
 
     for line in lines:
-        # Start a new Telegram part before a stock card, never in the middle of one.
-        if line.startswith("┏━━━━━━━━━━━━━━━━━━━━") and current:
-            if len("\\n".join(current)) > 1700:
+        # Start a new part before a detailed stock card, not halfway through it.
+        if line.startswith("🔹 STOCK ") and current:
+            if len("\n".join(current)) > 1800:
                 flush()
 
-        candidate = "\\n".join(current + [line])
+        candidate = "\n".join(current + [line])
         if len(candidate) > max_length and current:
             flush()
-            candidate = line
-
-        # A single line should never be large, but retain a safe fallback.
-        while len(candidate) > max_length:
-            chunks.append(candidate[:max_length])
-            candidate = candidate[max_length:]
-        current = [candidate] if not current else current + [line]
+        current.append(line)
 
     flush()
-    return chunks or [""]
+    # Telegram's message limit is 4096 characters; keep a safety margin.
+    safe_chunks = []
+    for chunk in chunks or [""]:
+        while len(chunk) > max_length:
+            cut = chunk.rfind("\n", 0, max_length)
+            if cut < max_length // 2:
+                cut = max_length
+            safe_chunks.append(chunk[:cut].strip())
+            chunk = chunk[cut:].strip()
+        if chunk:
+            safe_chunks.append(chunk)
+    return safe_chunks or [""]
+
 
 def send_telegram(message):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
