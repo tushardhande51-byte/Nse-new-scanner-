@@ -487,56 +487,85 @@ def main():
     ).to_csv("nse_timeframe_trends.csv", index=False)
 
     report_as_of = now_ist()
+    latest_data_time = max([x.get("DATA_AS_OF", "N/A") for x in live_checked], default="N/A")
+    green_count = sum(1 for x in live_checked if x.get("STATUS", "").startswith("🟢 GREEN"))
+    yellow_count = sum(1 for x in live_checked if x.get("STATUS", "").startswith("🟡 YELLOW"))
+    red_count = rejected_10am + rejected_runtime
     lines = [
-        "NSE MULTI-TIMEFRAME LIVE TREND REPORT",
-        f"Run time: {report_as_of:%d-%m-%Y %H:%M IST}",
-        f"Data as of latest completed 15m candle: {max([x.get('DATA_AS_OF', 'N/A') for x in live_checked], default='N/A')} IST",
-        f"Universe: {len(universe)} NSE EQ | scanned: {len(results)} | errors: {errors}",
-        "STRICT RULE: 4 timeframe directions + fixed 10AM trend + run-time trend must all agree (6/6).",
-        "10AM check: 09:15, 09:30, 09:45 candle CLOSES all on the same side of previous session close.",
-        "RUN-TIME check: every completed 15m candle from market open through the latest completed candle must stay on that same side of previous close.",
-        f"GREEN - STRONG TREND: {sum(1 for x in live_checked if x.get('STATUS', '').startswith('🟢 GREEN'))}",
-        f"🟡 YELLOW - WATCH: {sum(1 for x in live_checked if x.get('STATUS', '').startswith('🟡 YELLOW'))}",
-        f"🔴 RED - REJECT: {rejected_10am + rejected_runtime} (10AM failed/unavailable: {rejected_10am} | run-time failed/unavailable: {rejected_runtime})",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "📊 NSE MULTI-TIMEFRAME | LIVE TREND REPORT",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📅 Date/Run: {report_as_of:%d-%m-%Y %H:%M IST}",
+        f"📊 NSE EQ: {len(universe)} | Scanned: {len(results)} | Errors: {errors}",
+        f"⏱️ Latest completed 15m candle: {latest_data_time} IST",
+        f"✅ Strict 6/6 candidates: {len(live_checked)}",
         "",
-        f"6/6 UPTREND: {len(all_up)}",
-        "Stocks: " + (", ".join(all_up) if all_up else "None"),
+        "📌 SCANNER RULES",
+        "• Monthly + Weekly + Daily + 1 Hour directions must align.",
+        "• 10 AM: 09:15, 09:30, 09:45 closes must stay on one side of previous close.",
+        "• Run-time: every completed 15m close through this run must stay on that same side.",
+        "• Only fully closed candles are used. Close-to-close comparison; no EMA.",
+        "• Top 5 is a watchlist ranking, NOT an automatic buy signal.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        f"6/6 DOWNTREND: {len(all_down)}",
-        "Stocks: " + (", ".join(all_down) if all_down else "None"),
+        "🛡️ STATUS SUMMARY",
+        f"🟢 GREEN - STRONG: {green_count} | 🟡 YELLOW - WATCH: {yellow_count}",
+        f"🔴 RED - REJECT: {red_count} (10AM failed/unavailable: {rejected_10am} | Run-time failed/unavailable: {rejected_runtime})",
+        f"6/6 UPTREND: {len(all_up)} | 6/6 DOWNTREND: {len(all_down)}",
         "",
-        "TOP VOLUME (cumulative volume vs prior 20 sessions, same completed 15m slots):",
-        *([
-            f"{x['symbol']} | RVOL {x['RELATIVE_VOLUME_TO_TIME']:.2f}x | {x['VOLUME_STRENGTH']} | {x['STATUS']} | {x['ALIGNMENT']} | Data {x.get('DATA_AS_OF', 'N/A')}"
-            for x in volume_ranked[:10]
-        ] or ["No eligible same-time volume data"]),
+        "🏆 TOP 5 FINAL WATCHLIST",
+        "Strict 6/6 + GREEN RVOL >=1.5x + move <=10%; ranked by combined score.",
         "",
-        "TOP TREND (latest completed 15m close vs previous session close):",
-        *([
-            f"{x['symbol']} | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['ALIGNMENT']} | {x['STATUS']} | Data {x.get('DATA_AS_OF', 'N/A')}"
-            for x in trend_ranked[:10]
-        ] or ["No eligible trend data"]),
-        "",
-        "BEST VOLUME + TREND TOP 5 (ranking score /100; NOT a buy signal):",
-        *([
-            f"{x['symbol']} | Score {x['COMBINED_SCORE']:.1f}/100 | RVOL {x['RELATIVE_VOLUME_TO_TIME']:.2f}x | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['STATUS']}"
-            for x in combined_ranked[:5]
-        ] or ["No combined ranking available"]),
-        "",
-        "🏆 TOP 5 FINAL WATCHLIST (strict 6/6 + GREEN RVOL >=1.5x + move <=10%; no chasing):",
-        *([
-            f"{rank}. {x['symbol']} | Score {x['COMBINED_SCORE']:.1f}/100 | RVOL {x['RELATIVE_VOLUME_TO_TIME']:.2f}x | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['ALIGNMENT']} | {x['STATUS']}"
-            for rank, x in enumerate(final_watchlist, 1)
-        ] or ["No stock met all final watchlist rules; no forced picks."]),
-        "",
-        "🟢 GREEN = 6/6 alignment + same-time relative volume >=1.5x. 🟡 YELLOW = 6/6 alignment but volume below 1.5x or unavailable.",
-        "🔴 RED / REJECT = not shown in candidate list because one or more required trend confirmations failed or data was unavailable.",
-        "Volume strength: STRONG >=1.5x; MODERATE 1.2x-1.49x; NORMAL <1.2x.",
-        "Final watchlist rule: strict 6/6 alignment, GREEN same-time RVOL >=1.5x, absolute move from previous close <=10%, ranked by combined score; fewer than 5 are shown if fewer qualify.",
-        "Combined score is a heuristic ranking only, not an entry signal. Entry still requires your 5-minute candle CLOSE above today's high and a planned stop-loss.",
-        "If Yahoo intraday data is delayed/incomplete, the scanner can reject the symbol or show unavailable data; verify the candle timestamp before trading.",
-        "CSV artifact contains only 6/6 candidates and their run-time volume/trend fields.",
     ]
+    if final_watchlist:
+        for rank, x in enumerate(final_watchlist, 1):
+            lines.extend([
+                f"{rank}. {x['symbol']} - {x.get('company', x['symbol'])}",
+                f"   Score: {x['COMBINED_SCORE']:.1f}/100 | RVOL: {x['RELATIVE_VOLUME_TO_TIME']:.2f}x",
+                f"   Move: {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['ALIGNMENT']} | {x['STATUS']}",
+                f"   Data as of: {x.get('DATA_AS_OF', 'N/A')} IST",
+                "",
+            ])
+    else:
+        lines.append("No stock met all final watchlist rules. No forced picks.")
+    lines.extend(["📋 ALL STRICT 6/6 CANDIDATES", ""])
+    if live_checked:
+        for rank, x in enumerate(sorted(live_checked, key=lambda z: z.get("COMBINED_SCORE") or -1, reverse=True), 1):
+            rvol = x.get("RELATIVE_VOLUME_TO_TIME")
+            move = x.get("CHANGE_FROM_PREV_CLOSE_PCT")
+            lines.extend([
+                f"{rank}. {x['symbol']} - {x.get('company', x['symbol'])}",
+                f"   M/W/D/1H: {x.get('MONTHLY')} / {x.get('WEEKLY')} / {x.get('DAILY')} / {x.get('1 HOUR')}",
+                f"   10AM: {x.get('15M 10AM', 'N/A')} | Run-time: {x.get('15M RUN-TIME', 'N/A')}",
+                f"   RVOL: {f'{rvol:.2f}x' if rvol is not None else 'N/A'} | Move: {f'{move:+.2f}%' if move is not None else 'N/A'}",
+                f"   Status: {x.get('STATUS', 'N/A')} | Data: {x.get('DATA_AS_OF', 'N/A')} IST",
+                "",
+            ])
+    else:
+        lines.append("No stock passed the complete 6/6 trend confirmation.")
+    lines.extend(["📊 TOP VOLUME", ""])
+    if volume_ranked:
+        for rank, x in enumerate(volume_ranked[:10], 1):
+            lines.append(f"{rank}. {x['symbol']} | RVOL {x['RELATIVE_VOLUME_TO_TIME']:.2f}x | {x['VOLUME_STRENGTH']} | {x['STATUS']}")
+    else:
+        lines.append("Same-time relative-volume data unavailable.")
+    lines.extend(["", "📈 TOP TREND STRENGTH", ""])
+    if trend_ranked:
+        for rank, x in enumerate(trend_ranked[:10], 1):
+            lines.append(f"{rank}. {x['symbol']} | Move {x['CHANGE_FROM_PREV_CLOSE_PCT']:+.2f}% | {x['ALIGNMENT']} | {x['STATUS']}")
+    else:
+        lines.append("Trend-strength data unavailable.")
+    lines.extend([
+        "",
+        "🛡️ FINAL RISK / ENTRY NOTES",
+        "🟢 GREEN = 6/6 alignment + same-time relative volume >=1.5x.",
+        "🟡 YELLOW = 6/6 alignment but volume below 1.5x or unavailable.",
+        "🔴 RED = one or more required confirmations failed or data unavailable.",
+        "Final watchlist excludes moves above 10% to avoid chasing; fewer than 5 shown if fewer qualify.",
+        "Combined score is a ranking heuristic only. Entry still requires your 5-minute candle CLOSE above today's high and a planned stop-loss.",
+        "If Yahoo intraday data is delayed/incomplete, verify candle timestamp before trading.",
+        "CSV artifact: nse_timeframe_trends.csv. No orders placed.",
+    ])
     message = "\n".join(lines)
     print(message)
     delivered = send_telegram(message)
