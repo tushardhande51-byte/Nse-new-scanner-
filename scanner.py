@@ -223,6 +223,129 @@ def support_resistance_levels(frame, entry):
             stoploss_risk_pct, support_sl_buffer_pct)
 
 
+
+# NSE quarterly shareholding data: public holding is used only as a float proxy,
+# NOT represented as exact investible free float.
+NSE_SHAREHOLDING_API = "https://www.nseindia.com/api/corporate-share-holdings-master"
+NSE_SHAREHOLDING_REFERER = "https://www.nseindia.com/companies-listing/corporate-filings-shareholding-pattern"
+FLOAT_PROXY_MIN_PCT = 10.0
+FLOAT_PROXY_MAX_PCT = 40.0
+FLOAT_DEMAND_VOLUME_MIN = 2.0
+_NSE_FILINGS_SESSION = None
+
+
+def get_nse_filings_session():
+    global _NSE_FILINGS_SESSION
+    if _NSE_FILINGS_SESSION is None:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        session.headers.update({
+            "Accept": "application/json, text/plain, */*",
+            "Referer": NSE_SHAREHOLDING_REFERER,
+            "X-Requested-With": "XMLHttpRequest",
+        })
+        # Warm the NSE session before requesting filing metadata.
+        session.get(NSE_HOME, timeout=TIMEOUT)
+        _NSE_FILINGS_SESSION = session
+    return _NSE_FILINGS_SESSION
+
+
+def parse_nse_shareholding_xbrl(xml_text):
+    """Extract NSE-reported promoter/public roll-up percentages from XBRL."""
+    context_pattern = re.compile(
+        r'<(?:[A-Za-z0-9_]+:)?context\b[^>]*\bid="([^"]+)"[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?context>',
+        re.DOTALL,
+    )
+    member_pattern = re.compile(
+        r'<(?:[A-Za-z0-9_]+:)?explicitMember\b[^>]*>([^<]+)</(?:[A-Za-z0-9_]+:)?explicitMember>'
+    )
+    contexts = {
+        cid: set(member_pattern.findall(body))
+        for cid, body in context_pattern.findall(xml_text)
+    }
+    categories = {
+        "promoter": "ShareholdingOfPromoterAndPromoterGroupMember",
+        "public": "PublicShareholdingMember",
+    }
+    tag_names = (
+        "ShareholdingAsAPercentageOfTotalNumberOfShares",
+    )
+    found = {}
+    for tag in tag_names:
+        pattern = re.compile(
+            rf'<(?:[A-Za-z0-9_]+:)?{tag}\b[^>]*\bcontextRef="([^"]+)"[^>]*>([\d.\-]+)</(?:[A-Za-z0-9_]+:)?{tag}>'
+        )
+        for context_id, raw_value in pattern.findall(xml_text):
+            members = contexts.get(context_id, set())
+            if len(members) > 2:
+                continue
+            for category, member_name in categories.items():
+                if any(member.endswith(member_name) for member in members):
+                    try:
+                        found.setdefault(category, float(raw_value))
+                    except ValueError:
+                        pass
+    promoter = found.get("promoter")
+    public = found.get("public")
+    observed = [v for v in (promoter, public) if v is not None]
+    if observed:
+        total = sum(observed)
+        scale = 0.01 if total > 1000 else (100.0 if 0 < total < 2 else 1.0)
+        found = {k: round(v * scale, 4) for k, v in found.items()}
+    return found
+
+
+def fetch_nse_shareholding(symbol):
+    """Fetch the latest NSE XBRL filing for one technically-qualified symbol."""
+    try:
+        session = get_nse_filings_session()
+        response = session.get(
+            NSE_SHAREHOLDING_API,
+            params={"index": "equities", "symbol": symbol},
+            timeout=TIMEOUT,
+        )
+        response.raise_for_status()
+        filings = response.json()
+        if not isinstance(filings, list):
+            return {"shareholding_status": "NSE response format unavailable"}
+        filing = next((item for item in filings if item.get("xbrl")), None)
+        if not filing:
+            return {"shareholding_status": "NSE XBRL filing unavailable"}
+        xbrl_url = filing["xbrl"]
+        if xbrl_url.startswith("/"):
+            xbrl_url = "https://nsearchives.nseindia.com" + xbrl_url
+        xml_response = session.get(xbrl_url, timeout=TIMEOUT)
+        xml_response.raise_for_status()
+        values = parse_nse_shareholding_xbrl(xml_response.text)
+        if "public" not in values:
+            return {
+                "shareholding_status": "NSE XBRL parsed but public holding missing",
+                "shareholding_period": filing.get("date"),
+            }
+        return {
+            "nse_promoter_holding_pct": values.get("promoter"),
+            "nse_public_holding_pct": values.get("public"),
+            "nse_float_proxy_pct": values.get("public"),
+            "shareholding_period": filing.get("date"),
+            "shareholding_status": "OK - NSE public holding proxy; not exact free float",
+        }
+    except Exception as exc:
+        return {"shareholding_status": f"NSE shareholding unavailable: {type(exc).__name__}"}
+
+
+def classify_low_float_demand(item):
+    public_pct = item.get("nse_float_proxy_pct")
+    volume_ratio = item.get("volume_ratio", 0)
+    if public_pct is None:
+        return "DATA UNAVAILABLE"
+    if not (FLOAT_PROXY_MIN_PCT <= public_pct <= FLOAT_PROXY_MAX_PCT):
+        return "OUTSIDE PUBLIC-HOLDING PROXY RANGE"
+    if volume_ratio < FLOAT_DEMAND_VOLUME_MIN:
+        return "LOW FLOAT PROXY - DEMAND NOT CONFIRMED"
+    return "LOW FLOAT PROXY + HIGH DEMAND"
+
+
+
 def evaluate(symbol, company):
     frame = fetch_history(symbol)
     if frame is None or len(frame) < MIN_ROWS:
@@ -418,6 +541,16 @@ def main():
                 print(f"Progress: {count}/{len(universe)} | matches={len(matches)} | errors={errors}")
 
     matches.sort(key=lambda item: (item["adx"], item["volume_ratio"]), reverse=True)
+
+    # Fetch the latest quarterly NSE shareholding filing only for strict 6/6
+    # matches, avoiding thousands of unnecessary filing/XBRL requests.
+    print("Fetching latest NSE quarterly shareholding data for 6/6 matches...")
+    for index, item in enumerate(matches, 1):
+        item.update(fetch_nse_shareholding(item["symbol"]))
+        item["low_float_demand_status"] = classify_low_float_demand(item)
+        if index % 10 == 0:
+            print(f"NSE shareholding enriched: {index}/{len(matches)}")
+
     output = pd.DataFrame(matches)
     output.to_csv("nse_swing_signals.csv", index=False)
 
@@ -437,13 +570,30 @@ def main():
         "• PROJ. = calculated target; not confirmed resistance.",
         "• Booking: T1 50% | T2 30% | T3 20%.",
         "• After T1, trail SL below support.",
+        "• NSE public holding is a quarterly low-float PROXY, not exact investible free float.",
+        f"• Low-float proxy band: {FLOAT_PROXY_MIN_PCT:.0f}-{FLOAT_PROXY_MAX_PCT:.0f}% public holding; high demand: relative volume >= {FLOAT_DEMAND_VOLUME_MIN:.1f}x.",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
     if not matches:
         lines.extend(["❌ NO QUALIFIED STOCK TODAY", "No NSE stock passed all 6 technical filters."])
     else:
-        lines.extend(["🏆 TOP 3 QUALIFIED STOCKS SUMMARY", ""])
+        float_demand_matches = [
+            item for item in matches
+            if item.get("low_float_demand_status") == "LOW FLOAT PROXY + HIGH DEMAND"
+        ]
+        lines.extend(["🚀 LOW FLOAT PROXY + HIGH DEMAND | TOP 20", ""])
+        if float_demand_matches:
+            for rank, item in enumerate(float_demand_matches[:20], start=1):
+                lines.append(
+                    f"{rank}. {item['symbol']} | Public holding proxy: "
+                    f"{item['nse_float_proxy_pct']:.2f}% | Rel Vol: "
+                    f"{item['volume_ratio']:.1f}x | NSE period: "
+                    f"{item.get('shareholding_period') or 'N/A'}"
+                )
+        else:
+            lines.append("No 6/6 stock currently meets both the public-holding proxy band and 2.0x relative-volume condition.")
+        lines.extend(["", "🏆 TOP 3 QUALIFIED STOCKS SUMMARY", ""])
         for rank, item in enumerate(matches[:3], start=1):
             lines.extend([
                 f"{rank}. {item['symbol']} | {item['company']}",
@@ -481,6 +631,8 @@ def main():
                 "📈 MOMENTUM / VOLUME / RESISTANCE",
                 f"RSI: {item['rsi']:.1f} | ADX: {item['adx']:.1f}",
                 f"Relative Volume: {item['volume_ratio']:.1f}x | {item['volume_warning']}",
+                f"NSE Public Holding Proxy: {item.get('nse_float_proxy_pct', 'N/A')}% | {item.get('low_float_demand_status', 'DATA UNAVAILABLE')}",
+                f"NSE Shareholding Period: {item.get('shareholding_period', 'N/A')}",
                 f"Nearest resistance: {resistance_text}",
                 f"Resistance note: {item['resistance_warning']}",
                 "",
@@ -503,7 +655,7 @@ def main():
             lines.append("No stock is marked RED by the scanner's current quality rules.")
     lines.extend([
         "",
-        "DATA: NSE universe + Yahoo Finance daily candles.",
+        "DATA: NSE EQ universe + Yahoo Finance daily candles + NSE quarterly shareholding/XBRL filings for 6/6 matches.",
         "This is an EOD scan, not a live entry signal. Verify current market price before trading.",
         "No broker connection. No orders placed.",
     ])
