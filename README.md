@@ -16,6 +16,19 @@ Broker-free, automatic daily NSE cash-equity end-of-day scanner. It does **not**
 - Sends a Telegram summary when secrets are configured.
 - Runs Monday-Friday at 16:00 India time via GitHub Actions, plus manual Run workflow.
 
+
+## NSE low-float / high-demand shortlist
+
+The EOD scanner now enriches strict 6/6 technical matches with the latest NSE quarterly shareholding-pattern XBRL filing:
+- NSE promoter holding and public holding percentages are extracted from the latest available filing.
+- NSE public holding is used as a **low-float proxy only**; it is not exact investible free float because public holdings can include strategic, locked-in, or otherwise non-freely-traded shares.
+- Candidate band: 10%-40% NSE public-holding proxy.
+- Demand confirmation: relative volume at least 2.0x the 20-session average. The existing 6/6 technical filter already requires a 20-session breakout and volume above 1.5x.
+- The Telegram report displays up to 20 "LOW FLOAT PROXY + HIGH DEMAND" candidates separately. If NSE filing data is missing, the stock is marked unavailable; missing data is never treated as a pass.
+- Shareholding is quarterly, not live. The filing period is shown in the report.
+
+NSE shareholding filing page: https://www.nseindia.com/companies-listing/corporate-filings-shareholding-pattern
+
 ## GitHub Secrets
 In **Settings → Secrets and variables → Actions → New repository secret**, add:
 - `TELEGRAM_BOT_TOKEN`
