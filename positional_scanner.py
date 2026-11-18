@@ -334,68 +334,52 @@ def main():
     pd.DataFrame(results).reindex(columns=columns).to_csv("nse_positional_signals.csv", index=False)
 
     lines = [
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "📈 NSE POSITIONAL | LONG-ONLY REPORT",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"📅 Run: {started:%d-%m-%Y %H:%M IST}",
-        f"📊 NSE EQ: {len(universe)} | Processed: {len(results)} | Data/errors: {errors}",
-        "⏳ Holding preference: 5–20 trading days",
-        "✅ Filter: minimum 5/6; WEEKLY + DAILY must both PASS",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "📈 आज के TOP 5 POSITIONAL STOCKS",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"📅 {started:%d %b %Y} | Market Closed (EOD)",
+        f"🔎 Scanned: {len(universe)} NSE stocks | Eligible: {len(eligible)}",
+        f"✅ Normal Risk: {len(normal_risk)} | 🚨 High Risk: {len(high_risk)}",
         "",
-        "✅ Filter: Minimum 5/6 checks; Weekly + Daily trend mandatory.",
-        "Completed candles only | Long-only | No auto orders.",
-        "",
-        f"🎯 Eligible stocks: {len(eligible)} | Normal risk (<=10%): {len(normal_risk)} | High risk (>10%): {len(high_risk)}",
-        f"⚠️ Data/errors: {errors} symbols could not be fully checked; this is not a complete market-wide confirmation.",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "🏆 TOP 5 POSITIONAL WATCHLIST | Risk <=10%",
-        "Ranking unchanged: score, RVOL, then planned risk. Only completed candles are used.",
+        "🏆 TOP 5 WATCHLIST",
+        "Entry trigger par fresh confirmation ke baad hi consider karein.",
         "",
     ]
     if top5:
         for i, x in enumerate(top5, 1):
             lines.extend([
-                f"{i}) {x['symbol']} | Score {x['score']} | RVOL {x.get('relative_volume', 'N/A')}x",
-                f"   Entry: ₹{x['entry_trigger']} | Stop Loss: ₹{x['stop_loss']}",
-                f"   Target 1: ₹{x['target_1_2R']} | Target 2: ₹{x['target_2_3R']}",
-                f"   Planned Risk: {x.get('risk_pct', 'N/A')}% | Trend M/W/D/1H: {x['MONTHLY']}/{x['WEEKLY']}/{x['DAILY']}/{x['1H']}",
+                f"{i}. {x['symbol']}  |  {x['score']}  |  Volume {x.get('relative_volume', 'N/A')}x",
+                f"   Entry ₹{x['entry_trigger']}  |  SL ₹{x['stop_loss']}",
+                f"   T1 ₹{x['target_1_2R']}  |  T2 ₹{x['target_2_3R']}  |  Risk {x.get('risk_pct', 'N/A')}%",
                 "",
             ])
     else:
-        lines.append("Aaj <=10% planned risk wala koi eligible stock nahi mila. No forced picks.")
+        lines.append("Aaj koi normal-risk eligible stock nahi mila. No forced picks.")
+        lines.append("")
 
-    lines.extend(["📋 OTHER NORMAL-RISK STOCKS | Shortlist"])
+    lines.extend(["📋 OTHER STOCKS | Shortlist"])
     if remaining_normal:
-        lines.append(", ".join(
-            f"{x['symbol']} ({x['score']}, Risk {x['risk_pct']}%)" for x in remaining_normal
+        lines.append("  ".join(
+            f"{x['symbol']} ({x['score']})" for x in remaining_normal
         ))
     else:
-        lines.append("Top 5 ke alawa koi normal-risk candidate nahi.")
+        lines.append("Top 5 ke alawa koi normal-risk stock nahi.")
 
-    lines.extend([
-        "",
-        "🚨 HIGH RISK ALERT | Planned risk >10%",
-        "In stocks ka planned SL distance entry ke 10% se zyada hai. Extra caution: quantity reduce/skip and chart verify.",
-    ])
+    lines.extend(["", "🚨 HIGH RISK ALERT | Risk >10%"])
     if high_risk:
         for x in high_risk:
-            lines.append(f"• {x['symbol']} | {x['score']} | Risk {x['risk_pct']}% | Entry ₹{x['entry_trigger']} | SL ₹{x['stop_loss']}")
+            lines.append(f"• {x['symbol']} | {x['score']} | Risk {x['risk_pct']}%")
     else:
-        lines.append("Aaj koi eligible stock 10% se zyada planned risk mein nahi hai.")
+        lines.append("Aaj koi high-risk eligible stock nahi.")
 
     if risk_unavailable:
-        lines.extend(["", "⚠️ RISK DATA N/A", ", ".join(x["symbol"] for x in risk_unavailable)])
+        lines.extend(["", "⚠️ Risk calculate nahi ho paya: " + ", ".join(x["symbol"] for x in risk_unavailable)])
 
     lines.extend([
         "",
-        "⚠️ EXECUTION / RISK NOTES",
-        "Entry trigger is signal-day high + 0.1%; consider entry only after a fresh confirmation, not blindly at market.",
-        "SL is the lower of signal-day low and close minus 1.5 ATR(14); targets are 2R and 3R from entry.",
-        "If planned risk is unusually wide, skip or reduce quantity. Risk per trade should be capped by your own capital-risk rule.",
-        "Yahoo Finance data can be delayed, missing or adjusted. Verify live price, liquidity, corporate actions and candle timestamps before trading.",
-        "5–20 days is a holding preference, not a guaranteed exit date. Exit earlier if stop-loss or trend invalidation occurs.",
-        "This is a technical watchlist, not a return guarantee or personalized investment advice. Paper-test before real capital.",
-        "CSV artifact: nse_positional_signals.csv",
+        f"⚠️ Data note: {errors} stocks ka data unavailable/incomplete tha; verify live price, volume and chart before entry.",
+        "🎯 Targets 2R/3R model par based hain; guaranteed returns nahi. Position size apne risk ke hisaab se rakhein.",
+        "📎 Full details: nse_positional_signals.csv",
     ])
     message = "\n".join(lines)
     print(message)
