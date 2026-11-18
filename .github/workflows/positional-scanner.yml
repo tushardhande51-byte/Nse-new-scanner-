@@ -1,10 +1,8 @@
 name: NSE Positional Scanner
 
 on:
+  # Manual-only: run from GitHub Actions when requested.
   workflow_dispatch:
-  schedule:
-    # 16:20 IST, Monday-Friday (GitHub Actions cron uses UTC)
-    - cron: "50 10 * * 1-5"
 
 permissions:
   contents: read
