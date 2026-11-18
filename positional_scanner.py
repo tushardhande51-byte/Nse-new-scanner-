@@ -318,7 +318,12 @@ def main():
     )
     for rank, row in enumerate(eligible, 1):
         row["rank"] = rank
-    top5 = eligible[:5]
+    # Presentation buckets only: eligibility and ranking logic are unchanged.
+    normal_risk = [x for x in eligible if x.get("risk_pct") is not None and x["risk_pct"] <= 10.0]
+    high_risk = [x for x in eligible if x.get("risk_pct") is not None and x["risk_pct"] > 10.0]
+    risk_unavailable = [x for x in eligible if x.get("risk_pct") is None]
+    top5 = normal_risk[:5]
+    remaining_normal = normal_risk[5:]
 
     columns = [
         "rank", "symbol", "company", "score", "MONTHLY", "WEEKLY", "DAILY", "1H",
@@ -347,34 +352,46 @@ def main():
         "Only fully completed Daily / Weekly / Monthly / 1H candles are used.",
         "Signals are long-only. No short trades and no orders are placed.",
         "",
-        f"🎯 ELIGIBLE LONG STOCKS: {len(eligible)}",
+        f"🎯 Eligible stocks: {len(eligible)} | Normal risk (<=10%): {len(normal_risk)} | High risk (>10%): {len(high_risk)}",
+        f"⚠️ Data/errors: {errors} symbols could not be fully checked; this is not a complete market-wide confirmation.",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "🏆 TOP 5 POSITIONAL WATCHLIST",
-        "Ranked by score, relative volume, then planned risk. Fewer than 5 if fewer qualify.",
+        "🏆 TOP 5 POSITIONAL WATCHLIST | Risk <=10%",
+        "Ranking unchanged: score, RVOL, then planned risk. Only completed candles are used.",
         "",
     ]
     if top5:
         for i, x in enumerate(top5, 1):
             lines.extend([
-                f"{i}. {x['symbol']} - {x.get('company', x['symbol'])} | {x['score']}",
-                f"   M/W/D/1H: {x['MONTHLY']}/{x['WEEKLY']}/{x['DAILY']}/{x['1H']} | Breakout: {x['BREAKOUT_20D']} | Volume: {x['VOLUME_1_5X']}",
-                f"   RVOL: {x.get('relative_volume', 'N/A')}x | Signal close: ₹{x['signal_close']}",
-                f"   Entry trigger: ₹{x['entry_trigger']} | SL: ₹{x['stop_loss']}",
-                f"   T1 (2R): ₹{x['target_1_2R']} | T2 (3R): ₹{x['target_2_3R']} | Planned risk: {x.get('risk_pct', 'N/A')}%",
-                f"   Signal candle date: {x['signal_date']} | Failed: {x['failed_checks']}",
+                f"{i}) {x['symbol']} | Score {x['score']} | RVOL {x.get('relative_volume', 'N/A')}x",
+                f"   Entry: ₹{x['entry_trigger']} | Stop Loss: ₹{x['stop_loss']}",
+                f"   Target 1: ₹{x['target_1_2R']} | Target 2: ₹{x['target_2_3R']}",
+                f"   Planned Risk: {x.get('risk_pct', 'N/A')}% | Trend M/W/D/1H: {x['MONTHLY']}/{x['WEEKLY']}/{x['DAILY']}/{x['1H']}",
                 "",
             ])
     else:
-        lines.append("No stock met the positional rules today. No forced picks.\n")
+        lines.append("Aaj <=10% planned risk wala koi eligible stock nahi mila. No forced picks.")
 
-    lines.extend(["📋 ALL ELIGIBLE LONG CANDIDATES", ""])
-    for x in eligible:
-        lines.append(
-            f"{x['rank']}. {x['symbol']} | {x['score']} | RVOL {x.get('relative_volume', 'N/A')}x | "
-            f"Entry ₹{x['entry_trigger']} | SL ₹{x['stop_loss']} | T1 ₹{x['target_1_2R']} | T2 ₹{x['target_2_3R']}"
-        )
-    if not eligible:
-        lines.append("None.")
+    lines.extend(["📋 OTHER NORMAL-RISK STOCKS | Shortlist"])
+    if remaining_normal:
+        lines.append(", ".join(
+            f"{x['symbol']} ({x['score']}, Risk {x['risk_pct']}%)" for x in remaining_normal
+        ))
+    else:
+        lines.append("Top 5 ke alawa koi normal-risk candidate nahi.")
+
+    lines.extend([
+        "",
+        "🚨 HIGH RISK ALERT | Planned risk >10%",
+        "In stocks ka planned SL distance entry ke 10% se zyada hai. Extra caution: quantity reduce/skip and chart verify.",
+    ])
+    if high_risk:
+        for x in high_risk:
+            lines.append(f"• {x['symbol']} | {x['score']} | Risk {x['risk_pct']}% | Entry ₹{x['entry_trigger']} | SL ₹{x['stop_loss']}")
+    else:
+        lines.append("Aaj koi eligible stock 10% se zyada planned risk mein nahi hai.")
+
+    if risk_unavailable:
+        lines.extend(["", "⚠️ RISK DATA N/A", ", ".join(x["symbol"] for x in risk_unavailable)])
 
     lines.extend([
         "",
