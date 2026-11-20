@@ -92,10 +92,13 @@ def fetch_chart(symbol, period, interval, min_rows=50):
 
 def classify_close_direction(frame):
     """
-    Candle reversal rule using fully closed OHLC candles only:
-    - Green after Red: switch to UPTREND only when Green CLOSE > previous Red OPEN.
-    - Red after Green: switch to DOWNTREND only when Red CLOSE < previous Green OPEN.
-    - Otherwise retain the existing trend. Wicks and the live candle are ignored.
+    Evaluate fully closed candles only. Keep the latest opposite-colour candle
+    OPEN as the breakout/reversal level, even when one or more same-colour
+    candles appear in between:
+    - A GREEN candle flips/keeps trend UP when its CLOSE > latest RED OPEN.
+    - A RED candle flips/keeps trend DOWN when its CLOSE < latest GREEN OPEN.
+    - A new GREEN/RED candle refreshes that colour's OPEN reference.
+    Wicks and the currently forming candle are ignored.
     """
     if frame is None or len(frame) < 2 or not {"open", "close"}.issubset(frame.columns):
         return "DATA NOT AVAILABLE"
@@ -107,33 +110,27 @@ def classify_close_direction(frame):
     if len(candles) < 2:
         return "DATA NOT AVAILABLE"
 
-    def candle_color(row):
-        if row["close"] > row["open"]:
-            return "GREEN"
-        if row["close"] < row["open"]:
-            return "RED"
-        return "DOJI"
-
-    colors = [candle_color(row) for _, row in candles.iterrows()]
     trend = "SIDEWAYS"
-    for i, color in enumerate(colors):
-        if color == "DOJI":
-            continue
-        if trend == "SIDEWAYS":
-            trend = "UPTREND" if color == "GREEN" else "DOWNTREND"
-            continue
+    latest_green_open = None
+    latest_red_open = None
 
-        previous_color = colors[i - 1]
-        previous_open = float(candles.iloc[i - 1]["open"])
-        current_close = float(candles.iloc[i]["close"])
+    for _, candle in candles.iterrows():
+        candle_open = float(candle["open"])
+        candle_close = float(candle["close"])
 
-        if color == "GREEN" and previous_color == "RED" and current_close > previous_open:
-            trend = "UPTREND"
-        elif color == "RED" and previous_color == "GREEN" and current_close < previous_open:
-            trend = "DOWNTREND"
+        if candle_close > candle_open:  # GREEN candle
+            if latest_red_open is not None and candle_close > latest_red_open:
+                trend = "UPTREND"
+            latest_green_open = candle_open
+
+        elif candle_close < candle_open:  # RED candle
+            if latest_green_open is not None and candle_close < latest_green_open:
+                trend = "DOWNTREND"
+            latest_red_open = candle_open
+
+        # Doji candles do not change trend or either reference level.
 
     return trend
-
 
 def keep_only_closed_daily_bars(frame, now):
     """Daily Yahoo bars are dated by session; today's bar is usable only after NSE close."""
@@ -389,7 +386,7 @@ def send_telegram(message):
 def main():
     started = now_ist()
     print(f"NSE MULTI-TIMEFRAME TREND SCANNER | {started:%Y-%m-%d %H:%M:%S %Z}")
-    print("Trend rule: closed candles only. Green after Red flips UP only if Green CLOSE > previous Red OPEN; Red after Green flips DOWN only if Red CLOSE < previous Green OPEN. Wicks/live candle ignored. No EMA.")
+    print("Trend rule: closed candles only. Green CLOSE is checked against the latest Red OPEN (even across intervening Green candles); Red CLOSE is checked against the latest Green OPEN (even across intervening Red candles). Same-colour candles refresh their own OPEN reference. Wicks/live candle ignored. No EMA.")
     print("Timeframes: Monthly, Weekly, Daily, 1 Hour. This scanner is separate from the Daily 6/6 swing scanner.")
     universe = get_nse_universe()
     print(f"NSE EQ symbols downloaded: {len(universe)}")
@@ -534,8 +531,8 @@ def main():
         "• Monthly + Weekly + Daily + 1 Hour directions must align.",
         "• 10 AM: 09:15, 09:30, 09:45 closes must stay on one side of previous close.",
         "• Run-time: every completed 15m close through this run must stay on that same side.",
-        "• Monthly/Weekly/Daily/1H: Green after Red flips UP only if Green CLOSE > previous Red OPEN; Red after Green flips DOWN only if Red CLOSE < previous Green OPEN.", 
-        "• Only fully closed candles; wicks and running candles are ignored. No EMA.",
+        "• Monthly/Weekly/Daily/1H: Green CLOSE is checked against the latest Red OPEN; Red CLOSE is checked against the latest Green OPEN, even across intervening same-colour candles.",
+        "• Same-colour candles refresh their own OPEN reference. Only fully closed candles; wicks and running candles are ignored. No EMA.",
         "• Top 5 is a watchlist ranking, NOT an automatic buy signal.",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
